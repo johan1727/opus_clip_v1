@@ -2,7 +2,7 @@
 # Python 3.10+ requerido
 
 # UI
-gradio==4.44.0
+gradio==6.13.0
 
 # Transcripción - Whisper (OpenAI)
 openai-whisper==20231117

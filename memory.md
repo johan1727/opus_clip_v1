@@ -223,6 +223,11 @@ mismo día), así que no se consideran comprometidas — no hace falta rotarlas.
 - ✅ **Corregido**: type hint faltante en `load_saved_project` (`app.py`).
 - Quedan **17** bloques `except Exception as e` que devuelven strings planos a un textbox en vez
   de `gr.Error`/`gr.Warning` — ya priorizado como roadmap UX #3 más abajo, esfuerzo bajo.
+- ✅ **Corregido (2026-07-02)**: `requirements.txt` pineaba `gradio==4.44.0` pero el venv real
+  tiene `gradio==6.13.0` instalado (detectado al usar `buttons=["copy"]` en un `Textbox`, API que
+  no existe en 4.44 — ahí salió a la luz el drift). Se actualizó el pin en `requirements.txt` a
+  `6.13.0` para que coincida con lo que realmente corre. Un `pip install -r requirements.txt` en
+  limpio antes de este fix habría instalado una versión vieja e incompatible con el código actual.
 
 ### 🎨 UX/UI — realidad vs. documentación
 El proyecto está más avanzado de lo que `memory.md` indicaba antes de esta auditoría:
@@ -251,19 +256,26 @@ ducking, y overlay de marca/color — ver "Pendiente" arriba, corregido.
 Se lanzó la app y se tomaron screenshots de las 3 pantallas (Importar/Editar/Exportar) para
 revisar la UI tal como la ve el usuario, no solo leyendo el código de `app.py`.
 
+**⚠️ Corrección (2026-07-02, mismo día)**: el hallazgo original "tab Exportar vacío" fue un
+**falso positivo** del propio test de Playwright — el primer intento usó un selector de texto
+(`get_by_text("Exportar", exact=True)`) que apuntó al breadcrumb del stepper en vez del botón real
+del nav lateral (`button.nav-btn`). Con el selector correcto, la pantalla de Exportar está completa:
+selector de Estilo Visual, toggles de Mejoras IA, panel "Listo para Renderizar" (plataforma destino,
+post-procesamiento, Brand Kit, botón Exportar Video), galería de "Exports Recientes" y botones de
+compartir. **No hay bug acá** — queda como nota para no repetir el mismo error de test.
+
+**Hallazgo nuevo (válido) de esa misma pantalla**: la sección "Compartir" tiene botones para
+Facebook/Twitter/LinkedIn — las plataformas menos relevantes para clips verticales cortos — pero
+no para TikTok ni Instagram, que son el público objetivo real de esta herramienta. Probablemente
+son decorativos (como el badge de tokens), no prioritario arreglarlo, pero vale la pena saberlo.
+
 **Bugs de UX confirmados visualmente:**
-- **🔴 Tab "Exportar" se ve completamente vacío** cuando no hay clips seleccionados — ni un
-  mensaje de estado. Contrasta con "Editar", que sí muestra "Analiza un video para ver clips
-  detectados". Un usuario que hace click en "Exportar" antes de tiempo ve una pantalla en blanco
-  y puede pensar que la app está rota. **Fix sugerido**: mismo patrón de placeholder que "Editar".
 - **Nav lateral "Recursos 🔒" y "Ajustes 🔒"** están permanentemente bloqueados/grises — prometen
   funciones que no existen. Para uso 100% personal es inofensivo, pero si el proyecto se muestra
   a alguien más (o se piensa compartir), da sensación de producto a medio terminar. O se ocultan
   hasta que existan, o se quitan del nav.
-- **Footer expone "Construido con Gradio" + "Usar vía API"** — rompe la ilusión de producto
-  pulido tipo SaaS que el resto del diseño (header "OpusClip Pro V2.4 Powered by AI", badge de
-  tokens, campana de notificaciones) sí logra. Fix de una línea: `footer{display:none}` en el CSS
-  custom que ya existe, o `show_api=False` en `ui.launch()`.
+- ✅ **Corregido (2026-07-02)**: footer con "Construido con Gradio" / "Usar vía API" oculto vía
+  `footer{display:none!important}` agregado al CSS custom de `app.py`. Verificado con Playwright.
 - Header tiene badge "1,200 Tokens", campana y avatar de perfil — decorativos, no hacen nada.
   Coherente con la estética "SaaS" que se buscó, pero si en algún momento confunden al usuario
   (¿por qué no cambia el contador de tokens?), vale la pena quitarlos o cablearlos a algo real.
@@ -273,16 +285,17 @@ revisar la UI tal como la ve el usuario, no solo leyendo el código de `app.py`.
 **Hallazgo de contenido viral (experto UX + growth IG/YT/TT) — el mayor gap real de producto:**
 `app.py:_generate_clip_metadata` (línea ~908) **ya genera** título, descripción, hashtags y CTA
 por clip — una feature core de Opus Clip que YA EXISTE en este proyecto. Pero:
-1. **Está mal expuesta**: se escribe a un `.json` que se agrega a la lista de descargas del
-   `gr.File`, no se muestra como texto legible/copiable en la UI. Un creador necesita copiar y
-   pegar el caption directo a TikTok/IG al momento de publicar — obligarlo a abrir un JSON
-   descargado mata el ahorro de tiempo que la feature debería dar. **Fix sugerido**: agregar un
-   `gr.Textbox` (o Markdown con botón de copiar) por clip en el panel de exportación mostrando
-   título + caption + hashtags listos para pegar.
-2. **Calidad de los hashtags es débil**: se extraen de `hook + reason` (el texto que Gemini
-   genera para *explicar por qué el clip es viral*, ej. "Ojos desorbitados de sorpresa"), no del
-   *tema* real del clip. Esto puede producir hashtags como `#desorbitados` en vez de hashtags de
-   descubrimiento reales (`#storytime`, `#viral`, tema del video). **Fix sugerido**: pedirle a
+1. ✅ **Corregido (2026-07-02)**: antes solo se escribía a un `.json` descargable, invisible para
+   el creador al momento de publicar. Se extrajo la lógica compartida a `_build_social_metadata()`
+   (usada tanto por `_generate_clip_metadata` para el JSON como por la nueva `_build_captions_text()`),
+   y se agregó un `gr.Textbox` de solo lectura ("📋 Captions listos para publicar") con botón de
+   copiar (`buttons=["copy"]`) en el panel de exportación, debajo de "Descargar archivos". Muestra
+   título + descripción + hashtags + CTA de cada clip exportado, listo para pegar en TikTok/IG/YT.
+   Verificado en vivo con Playwright (aparece correctamente, con placeholder cuando no hay exports).
+2. **Sigue pendiente — calidad de los hashtags es débil**: se extraen de `hook + reason` (el texto
+   que Gemini genera para *explicar por qué el clip es viral*, ej. "Ojos desorbitados de sorpresa"),
+   no del *tema* real del clip. Esto puede producir hashtags como `#desorbitados` en vez de hashtags
+   de descubrimiento reales (`#storytime`, `#viral`, tema del video). **Fix sugerido**: pedirle a
    Gemini hashtags explícitos en el mismo prompt de análisis (ya devuelve JSON estructurado, es
    agregar un campo `hashtags` al schema) en vez de derivarlos con regex del texto de rationale.
 - **Zonas seguras de plataforma no consideradas**: TikTok/Reels/Shorts tapan con su propia UI

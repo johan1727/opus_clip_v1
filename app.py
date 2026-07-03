@@ -905,53 +905,87 @@ class OpusClipPro:
             logger.warning(f"No se pudo generar VTT para clip {index+1}: {e}")
             return None
 
+    def _build_social_metadata(
+        self, clip_state, index: int, platform: str, brand_name: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Construye título, caption, hashtags y CTA para un clip.
+
+        Los hashtags se derivan de `hook`/`reason` (el texto que explica por qué el clip
+        es viral) por ahora vía extracción simple de palabras — no reflejan necesariamente
+        el tema real del clip. Ver roadmap en memory.md para pedirlos directo a Gemini.
+        """
+        keywords = []
+        text = f"{clip_state.hook} {clip_state.reason}".lower()
+        for word in text.replace(",", " ").replace(".", " ").split():
+            clean = word.strip("#:;!?¡¿()[]{}\"'").lower()
+            if len(clean) > 4 and clean not in keywords:
+                keywords.append(clean)
+            if len(keywords) >= 8:
+                break
+        hashtags = [f"#{w}" for w in keywords[:5]]
+        title = clip_state.hook.strip()[:80] or f"Clip viral {index+1}"
+        description = f"{clip_state.reason.strip()[:180]}\n\n{' '.join(hashtags)}".strip()
+        return {
+            "clip": index + 1,
+            "platform": platform,
+            "brand": brand_name,
+            "title": title,
+            "description": description,
+            "hashtags": hashtags,
+            "cta": "Sígueme para más clips como este.",
+            "mood": getattr(clip_state, 'mood', 'neutral'),
+            "hook_type": getattr(clip_state, 'hook_type', 'unknown'),
+            "ideal_platform": getattr(clip_state, 'ideal_platform', platform),
+            "edit_recipe": getattr(clip_state, 'edit_recipe', ''),
+            "score": {
+                "virality": clip_state.virality_score,
+                "hook": clip_state.hook_score,
+                "pacing": clip_state.pacing_score,
+                "engagement": clip_state.engagement_score,
+                "flow": getattr(clip_state, 'flow_score', 0.0),
+                "value": getattr(clip_state, 'value_score', 0.0),
+                "trend": getattr(clip_state, 'trend_score', 5.0),
+            },
+            "timing": {
+                "start": clip_state.start,
+                "end": clip_state.end,
+                "duration": clip_state.duration
+            }
+        }
+
     def _generate_clip_metadata(self, clip_state, index: int, platform: str, brand_name: str = "") -> Optional[str]:
         """Genera metadata JSON por clip con score, hook y textos sociales básicos."""
         try:
-            keywords = []
-            text = f"{clip_state.hook} {clip_state.reason}".lower()
-            for word in text.replace(",", " ").replace(".", " ").split():
-                clean = word.strip("#:;!?¡¿()[]{}\"'").lower()
-                if len(clean) > 4 and clean not in keywords:
-                    keywords.append(clean)
-                if len(keywords) >= 8:
-                    break
-            hashtags = [f"#{w}" for w in keywords[:5]]
-            title = clip_state.hook.strip()[:80] or f"Clip viral {index+1}"
-            description = f"{clip_state.reason.strip()[:180]}\n\n{' '.join(hashtags)}".strip()
-            metadata = {
-                "clip": index + 1,
-                "platform": platform,
-                "brand": brand_name,
-                "title": title,
-                "description": description,
-                "hashtags": hashtags,
-                "cta": "Sígueme para más clips como este.",
-                "mood": getattr(clip_state, 'mood', 'neutral'),
-                "hook_type": getattr(clip_state, 'hook_type', 'unknown'),
-                "ideal_platform": getattr(clip_state, 'ideal_platform', platform),
-                "edit_recipe": getattr(clip_state, 'edit_recipe', ''),
-                "score": {
-                    "virality": clip_state.virality_score,
-                    "hook": clip_state.hook_score,
-                    "pacing": clip_state.pacing_score,
-                    "engagement": clip_state.engagement_score,
-                    "flow": getattr(clip_state, 'flow_score', 0.0),
-                    "value": getattr(clip_state, 'value_score', 0.0),
-                    "trend": getattr(clip_state, 'trend_score', 5.0),
-                },
-                "timing": {
-                    "start": clip_state.start,
-                    "end": clip_state.end,
-                    "duration": clip_state.duration
-                }
-            }
+            metadata = self._build_social_metadata(clip_state, index, platform, brand_name)
             meta_path = config.OUTPUT_DIR / f"viral_clip_{index+1:02d}_{clip_state.virality_score:.1f}.metadata.json"
             meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
             return str(meta_path)
         except Exception as e:
             logger.warning(f"No se pudo generar metadata para clip {index+1}: {e}")
             return None
+
+    def _build_captions_text(
+        self, clips_with_paths: List[Tuple[Any, Optional[str]]], platform: str, brand_name: str = ""
+    ) -> str:
+        """Arma un bloque de texto plano con título+caption+hashtags+CTA por clip, listo para copiar."""
+        blocks = []
+        for i, (clip_state, output_path) in enumerate(clips_with_paths):
+            if not output_path:
+                continue
+            try:
+                meta = self._build_social_metadata(clip_state, i, platform, brand_name)
+                blocks.append(
+                    f"— Clip {meta['clip']} (⭐ {meta['score']['virality']:.1f}) —\n"
+                    f"{meta['title']}\n\n"
+                    f"{meta['description']}\n\n"
+                    f"{meta['cta']}"
+                )
+            except Exception as e:
+                logger.warning(f"No se pudo armar caption para clip {i+1}: {e}")
+        if not blocks:
+            return ""
+        return "\n\n".join(blocks)
 
     def export_clips(
         self,
@@ -968,27 +1002,27 @@ class OpusClipPro:
         enable_mood_grade: bool = True,
         enable_ducking: bool = True,
         enable_zoom_cues: bool = False,
-    ) -> Tuple[str, List, List[str]]:
+    ) -> Tuple[str, List, List[str], str]:
         """
         Exporta clips seleccionados, soporta procesamiento paralelo.
-        
+
         Args:
             style_name: Nombre del estilo de subtítulos
             progress: Callback de progreso Gradio
             parallel: Usar paralelización (default: True)
             track_faces: Activar seguimiento facial AI
             subtitle_mode: "static" o "karaoke"
-            
+
         Returns:
-            (status_message, gallery_data, output_file_paths)
+            (status_message, gallery_data, output_file_paths, captions_text)
         """
         if not self.current_state or not self.current_video:
-            return "❌ No hay proyecto activo. Por favor analiza un video primero en la pestaña Importar.", [], []
+            return "❌ No hay proyecto activo. Por favor analiza un video primero en la pestaña Importar.", [], [], ""
         # Sync state_manager with current in-memory state
         self.state_manager.current_state = self.current_state
         selected_clips = [c for c in self.current_state.clips if c.selected]
         if not selected_clips:
-            return "⚠️ No hay clips seleccionados. Por favor selecciona clips en la pestaña Editar.", [], []
+            return "⚠️ No hay clips seleccionados. Por favor selecciona clips en la pestaña Editar.", [], [], ""
         
         # Map platform to real output resolution
         platform_resolution = {
@@ -1098,19 +1132,23 @@ class OpusClipPro:
                         logger.info(f"Metadata generada: {meta_file}")
             
             progress(1.0, desc=f"✅ {len(successful_exports)}/{total} clips exportados!")
-            
+
+            captions_text = self._build_captions_text(
+                list(zip(selected_clips, output_files)), platform, brand_name
+            )
+
             platform_label = platform.upper()
             if len(successful_exports) == total:
                 sidecars = sum(1 for f in all_outputs if f.endswith(('.srt', '.vtt')))
                 sidecar_note = f" + {sidecars} subtítulos" if sidecars else ""
-                return f"🎉 {len(successful_exports)} clips exportados para {platform_label} ({target_width}x{target_height}){sidecar_note}", gallery_data, all_outputs
+                return f"🎉 {len(successful_exports)} clips exportados para {platform_label} ({target_width}x{target_height}){sidecar_note}", gallery_data, all_outputs, captions_text
             else:
-                return f"⚠️ {len(successful_exports)}/{total} clips exportados para {platform_label} ({target_width}x{target_height})", gallery_data, all_outputs
-                
+                return f"⚠️ {len(successful_exports)}/{total} clips exportados para {platform_label} ({target_width}x{target_height})", gallery_data, all_outputs, captions_text
+
         except Exception as e:
             logger.error(f"Error en exportación: {e}", exc_info=True)
             successful = [f for f in output_files if f is not None]
-            return f"❌ Error: {str(e)}", [], successful
+            return f"❌ Error: {str(e)}", [], successful, ""
     
     def create_ui(self) -> gr.Blocks:
         """UI profesional tipo OpusClip."""
@@ -2374,6 +2412,11 @@ class OpusClipPro:
             align-items: center !important;
             justify-content: center !important;
         }
+        /* Ocultar el footer de Gradio ("Usar via API" / "Construido con Gradio") para mantener
+           la ilusión de producto propio en vez de una demo de Gradio */
+        footer {
+            display: none !important;
+        }
         """
         
         self._css = custom_css
@@ -2937,7 +2980,15 @@ class OpusClipPro:
                                 """)
                                 output_gallery = gr.Gallery(label="", columns=4, rows=1, height=300)
                                 output_files = gr.File(label="Descargar archivos", file_count="multiple")
-                                
+                                captions_output = gr.Textbox(
+                                    label="📋 Captions listos para publicar (título + descripción + hashtags por clip)",
+                                    lines=10,
+                                    max_lines=24,
+                                    interactive=False,
+                                    buttons=["copy"],
+                                    placeholder="Acá vas a ver el título, caption y hashtags de cada clip después de exportar, listos para copiar y pegar en TikTok/IG/YouTube."
+                                )
+
                                 # Social Sharing
                                 gr.HTML("""
                                 <div style="margin-top: 20px;">
@@ -3244,7 +3295,7 @@ class OpusClipPro:
                 inputs=[style_dropdown, subtitle_mode_dropdown, face_tracking_checkbox, platform_preset,
                         export_srt_checkbox, export_vtt_checkbox, brand_name_input, brand_color_input,
                         mood_grade_checkbox, audio_ducking_checkbox, zoom_cues_checkbox],
-                outputs=[export_status, output_gallery, output_files]
+                outputs=[export_status, output_gallery, output_files, captions_output]
             )
             
             # === STYLE BUTTON EVENTS ===
