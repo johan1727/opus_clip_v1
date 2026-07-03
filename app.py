@@ -808,21 +808,30 @@ class OpusClipPro:
 
             # Step 3: audio ducking (F3.4)
             if enable_ducking:
-                ducked = str(temp_base) + "_ducked.mp4"
-                current = self.editor.apply_audio_ducking(current, ducked)
+                try:
+                    ducked = str(temp_base) + "_ducked.mp4"
+                    current = self.editor.apply_audio_ducking(current, ducked)
+                except Exception as _de:
+                    logger.warning(f"Audio ducking omitido en clip {i+1}: {_de}")
 
             # Step 4: color grading by mood (F3.1)
             mood = getattr(clip_state, 'mood', 'neutral')
             if enable_mood_grade and mood and mood != 'neutral':
-                graded = str(temp_base) + "_graded.mp4"
-                current = self.editor.apply_mood_grade(current, graded, mood)
+                try:
+                    graded = str(temp_base) + "_graded.mp4"
+                    current = self.editor.apply_mood_grade(current, graded, mood)
+                except Exception as _ge:
+                    logger.warning(f"Color grading omitido en clip {i+1}: {_ge}")
 
             # Step 5: branding overlay (F3.2)
             if brand_name:
-                branded = str(temp_base) + "_branded.mp4"
-                current = self.editor.add_branding_overlay(
-                    current, branded, brand_name=brand_name, brand_color=brand_color
-                )
+                try:
+                    branded = str(temp_base) + "_branded.mp4"
+                    current = self.editor.add_branding_overlay(
+                        current, branded, brand_name=brand_name, brand_color=brand_color
+                    )
+                except Exception as _be:
+                    logger.warning(f"Branding overlay omitido en clip {i+1}: {_be}")
 
             # Move final result to output_file
             import shutil as _sh

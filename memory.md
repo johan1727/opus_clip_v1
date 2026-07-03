@@ -198,19 +198,20 @@ mismo día), así que no se consideran comprometidas — no hace falta rotarlas.
 - `app_old.py` (22KB) — código muerto casi duplicado de `app.py` (misma clase `OpusClipPro`),
   confirmado también por graphify (nodo "surprising connection" `app_old.py` ↔ `app.py`).
   **Pendiente**: eliminarlo (regla #10 de `claude.md`).
-- **🔴 CRÍTICO — estado compartido entre sesiones de Gradio** (`app.py:3284`): la app crea **una
-  sola instancia** de `OpusClipPro()` y todos los usuarios/pestañas comparten sus atributos
-  mutables (`self.current_state`, `self.current_video`, `self.cancel_requested`,
+- **🔴 CRÍTICO (impacto bajo hoy) — estado compartido entre sesiones de Gradio** (`app.py:3284`):
+  la app crea **una sola instancia** de `OpusClipPro()` y todos los usuarios/pestañas comparten sus
+  atributos mutables (`self.current_state`, `self.current_video`, `self.cancel_requested`,
   `self.subtitle_editors`). Si dos pestañas/usuarios usan la app a la vez, uno puede pisar el
-  video/clips del otro, o cancelar el análisis del otro. Hoy es uso personal de una sola persona
-  así que el impacto es bajo, pero si `GRADIO_SERVER_NAME` se deja en `0.0.0.0` (ver tabla de
-  seguridad arriba) y se accede desde el celular *y* la PC a la vez, ya se dispara.
-  **Fix (no aplicado, requiere refactor mayor)**: mover `current_state`/`current_video`/
-  `subtitle_editors`/`cancel_requested` a `gr.State()` por sesión en vez de atributos de `self`.
-- **🟠 ALTO — export de clips no aísla fallos por etapa** (`app.py:806-821`, `_export_single_clip`):
-  solo el paso de zoom cues tiene try/except propio con fallback; ducking/mood-grade/branding no
-  lo tienen, así que si cualquiera falla, se descarta el clip completo (incluyendo el crop+subtítulos
-  que ya habían salido bien). **Fix (no aplicado)**: try/except individual por paso, igual que zoom cues.
+  video/clips del otro, o cancelar el análisis del otro.
+  **Decisión del usuario (2026-07-02)**: no se arregla por ahora — uso personal de una sola persona
+  en localhost, no vale el riesgo de un refactor grande (mover `current_state`/`current_video`/
+  `subtitle_editors`/`cancel_requested` a `gr.State()` por sesión) sin poder probarlo en vivo.
+  Revisar si esto cambia si `GRADIO_SERVER_NAME` deja de ser `127.0.0.1`/uso mono-usuario.
+- ✅ **Corregido**: export de clips (`app.py`, `_export_single_clip`) — antes solo el paso de zoom
+  cues tenía try/except propio; si ducking/mood-grade/branding fallaban, se perdía el clip completo
+  (incluyendo el crop+subtítulos que ya habían salido bien). Ahora los 3 pasos tienen try/except
+  individual con `logger.warning`, igual que zoom cues — un fallo en un paso solo lo omite, no tira
+  el clip entero.
 - ✅ **Corregido**: `StateManager.save_state()` (`state_manager.py`) ahora usa `threading.Lock()` +
   escritura atómica (`os.replace`) para evitar JSON corrupto por escrituras concurrentes.
 - ✅ **Corregido**: `on_video_select` (`app.py`, precheck de video) ya loguea el error en vez de
