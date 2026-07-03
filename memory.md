@@ -292,12 +292,26 @@ por clip — una feature core de Opus Clip que YA EXISTE en este proyecto. Pero:
    copiar (`buttons=["copy"]`) en el panel de exportación, debajo de "Descargar archivos". Muestra
    título + descripción + hashtags + CTA de cada clip exportado, listo para pegar en TikTok/IG/YT.
    Verificado en vivo con Playwright (aparece correctamente, con placeholder cuando no hay exports).
-2. **Sigue pendiente — calidad de los hashtags es débil**: se extraen de `hook + reason` (el texto
-   que Gemini genera para *explicar por qué el clip es viral*, ej. "Ojos desorbitados de sorpresa"),
-   no del *tema* real del clip. Esto puede producir hashtags como `#desorbitados` en vez de hashtags
-   de descubrimiento reales (`#storytime`, `#viral`, tema del video). **Fix sugerido**: pedirle a
-   Gemini hashtags explícitos en el mismo prompt de análisis (ya devuelve JSON estructurado, es
-   agregar un campo `hashtags` al schema) en vez de derivarlos con regex del texto de rationale.
+2. ✅ **Corregido (2026-07-02)**: los hashtags ahora los devuelve Gemini directamente en el mismo
+   JSON del análisis (`ViralClip.hashtags`, campo nuevo en el schema/few-shot de `llm_analyzer.py`,
+   4-6 hashtags sobre el tema real del clip, mezclando nicho + alcance genérico). `_parse_hashtags()`
+   normaliza y valida la respuesta (minúsculas, con `#`, dedupe, máx 6, descarta valores no-string).
+   `_build_social_metadata()` en `app.py` usa `clip_state.hashtags` si Gemini los devolvió, y solo
+   cae al regex viejo (`hook+reason`) para proyectos guardados antes de este cambio.
+   **Verificado con una llamada real a Gemini**: para un clip sobre "se quemó la cena y el gato se
+   comió todo", devolvió `#storytime #gatostiktok #cenadesastre #viral #fyp #parati` — hashtags de
+   tema real, no derivados del texto de "por qué es viral" como antes.
+   **Bug encontrado y corregido de paso**: la prueba reveló que la key #1 del pool (la original)
+   está **suspendida por Google** (`403 CONSUMER_SUSPENDED`), y la rotación automática de keys
+   (agregada antes en esta misma sesión) solo detectaba errores de cuota/429, no de key
+   inválida/suspendida (403) — así que con la key #1 muerta, la rotación no se activaba y fallaba
+   directo. Se amplió `_is_quota_error()` en `llm_analyzer.py` para también rotar en 403/permission
+   denied/suspended/invalid api key. Verificado: ahora rota de la key #1 (suspendida) a la #2
+   automáticamente y el análisis funciona.
+   **⚠️ Pendiente del usuario**: la 1ª key en `GEMINI_API_KEYS` dentro de `.env` (la que era el
+   fallback hardcodeado original) está suspendida por Google — no hace daño dejarla (el pool la
+   salta sola), pero conviene reemplazarla por una key nueva o quitarla de `.env` para no gastar el
+   intento fallido en cada análisis. (Ver `.env` local — nunca en este archivo ni en git.)
 - **Zonas seguras de plataforma no consideradas**: TikTok/Reels/Shorts tapan con su propia UI
   (botones de interacción, perfil, caption nativo) las zonas inferior-derecha y a veces superior
   del video 9:16. Los subtítulos con `position: bottom` (estilo Minimal/Classic en `config.py`)

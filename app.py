@@ -911,19 +911,24 @@ class OpusClipPro:
         """
         Construye título, caption, hashtags y CTA para un clip.
 
-        Los hashtags se derivan de `hook`/`reason` (el texto que explica por qué el clip
-        es viral) por ahora vía extracción simple de palabras — no reflejan necesariamente
-        el tema real del clip. Ver roadmap en memory.md para pedirlos directo a Gemini.
+        Los hashtags vienen directo de Gemini (`clip_state.hashtags`, sobre el tema real del
+        clip). Si no hay ninguno — proyectos guardados antes de este cambio, o si Gemini no
+        los devolvió — se recurre a extraerlos de `hook`/`reason` como antes (menos preciso,
+        ya que ese texto explica *por qué* el clip es viral, no de qué trata).
         """
-        keywords = []
-        text = f"{clip_state.hook} {clip_state.reason}".lower()
-        for word in text.replace(",", " ").replace(".", " ").split():
-            clean = word.strip("#:;!?¡¿()[]{}\"'").lower()
-            if len(clean) > 4 and clean not in keywords:
-                keywords.append(clean)
-            if len(keywords) >= 8:
-                break
-        hashtags = [f"#{w}" for w in keywords[:5]]
+        gemini_hashtags = [h for h in (getattr(clip_state, 'hashtags', None) or []) if h]
+        if gemini_hashtags:
+            hashtags = gemini_hashtags
+        else:
+            keywords = []
+            text = f"{clip_state.hook} {clip_state.reason}".lower()
+            for word in text.replace(",", " ").replace(".", " ").split():
+                clean = word.strip("#:;!?¡¿()[]{}\"'").lower()
+                if len(clean) > 4 and clean not in keywords:
+                    keywords.append(clean)
+                if len(keywords) >= 8:
+                    break
+            hashtags = [f"#{w}" for w in keywords[:5]]
         title = clip_state.hook.strip()[:80] or f"Clip viral {index+1}"
         description = f"{clip_state.reason.strip()[:180]}\n\n{' '.join(hashtags)}".strip()
         return {

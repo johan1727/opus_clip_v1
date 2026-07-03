@@ -9,7 +9,7 @@ import os
 import re
 import time
 from typing import Dict, List, Optional, Any, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 try:
     from json_repair import repair_json
@@ -72,6 +72,7 @@ class ViralClip:
     hook_type: str = "unknown"
     ideal_platform: str = "tiktok"
     edit_recipe: str = ""
+    hashtags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -91,7 +92,26 @@ class ViralClip:
             'hook_type': self.hook_type,
             'ideal_platform': self.ideal_platform,
             'edit_recipe': self.edit_recipe,
+            'hashtags': self.hashtags,
         }
+
+
+def _parse_hashtags(raw: Any) -> List[str]:
+    """Normaliza la lista de hashtags devuelta por Gemini: '#minuscula-sin-espacios'."""
+    if not isinstance(raw, list):
+        return []
+    hashtags = []
+    for item in raw:
+        if not item or not isinstance(item, str):
+            continue
+        tag = item.strip().lower().replace(" ", "")
+        if not tag:
+            continue
+        if not tag.startswith("#"):
+            tag = f"#{tag}"
+        if tag not in hashtags:
+            hashtags.append(tag)
+    return hashtags[:6]
 
 
 class GeminiAnalyzer:
@@ -156,16 +176,23 @@ class GeminiAnalyzer:
 
     @staticmethod
     def _is_quota_error(error: Exception) -> bool:
-        """Detecta si un error de Gemini es por rate-limit/cuota agotada (HTTP 429)."""
+        """
+        Detecta si un error de Gemini se resuelve rotando a la siguiente API key del pool:
+        cuota/rate-limit agotada (429), o la key está inválida/suspendida/sin permiso (403).
+        """
         message = str(error).lower()
-        return any(marker in message for marker in ("429", "quota", "rate limit", "resource_exhausted"))
+        markers = (
+            "429", "quota", "rate limit", "resource_exhausted",
+            "403", "permission denied", "suspended", "api_key_invalid", "invalid api key",
+        )
+        return any(marker in message for marker in markers)
 
     def _rotate_api_key(self) -> None:
         """Avanza a la siguiente API key del pool y reconfigura el cliente Gemini."""
         self._key_index = (self._key_index + 1) % len(self.api_keys)
         self.api_key = self.api_keys[self._key_index]
         self._configure_api()
-        logger.info(f"Rotando a API key #{self._key_index + 1}/{len(self.api_keys)} por límite de cuota")
+        logger.info(f"Rotando a API key #{self._key_index + 1}/{len(self.api_keys)} por error de cuota/permiso")
 
     def _generate_with_rotation(self, prompt: Any, generation_config: GenerationConfig) -> Any:
         """
@@ -257,17 +284,20 @@ Estos son clips REALES de alta viralidad de contenido de personas hablando:
       "engagement_score": 9.2, "flow_score": 8.8, "value_score": 8.5, "emotional_arc_score": 9.4,
       "mood": "shocking", "hook_type": "facial_reveal", "ideal_platform": "tiktok",
       "reason": "Ojos desorbitados de sorpresa en segundo 2 + payoff escalofriante con twist final. Emotional arc perfecto.",
-      "hook": "No vas a creer lo que me encontré en mi armario.", "edit_recipe": "Zoom punch-in a cara de sorpresa seg 2 + freeze 0.5s + captions grandes del hook + SFX 'wait for it'"}},
+      "hook": "No vas a creer lo que me encontré en mi armario.", "edit_recipe": "Zoom punch-in a cara de sorpresa seg 2 + freeze 0.5s + captions grandes del hook + SFX 'wait for it'",
+      "hashtags": ["#storytime", "#armario", "#plottwist", "#viral", "#fyp"]}},
     {{"start": 67.0, "end": 98.0, "virality_score": 8.7, "hook_score": 8.8, "pacing_score": 9.0,
       "engagement_score": 8.5, "flow_score": 9.1, "value_score": 9.0, "emotional_arc_score": 8.6,
       "mood": "controversial", "hook_type": "controversial_take", "ideal_platform": "tiktok",
       "reason": "Hot take polémico que genera comentarios. Setup calmado → intensidad creciente → pausa dramática → reveal.",
-      "hook": "Odio decirlo, pero los padres millennials están arruinando a sus hijos.", "edit_recipe": "Texto del statement en ROJO grande seg 1 + zoom lento + pausa 1s + 'COMENTA si estás de acuerdo' CTA"}},
+      "hook": "Odio decirlo, pero los padres millennials están arruinando a sus hijos.", "edit_recipe": "Texto del statement en ROJO grande seg 1 + zoom lento + pausa 1s + 'COMENTA si estás de acuerdo' CTA",
+      "hashtags": ["#crianza", "#millennials", "#hottake", "#debate", "#parenting"]}},
     {{"start": 145.0, "end": 178.0, "virality_score": 9.0, "hook_score": 9.2, "pacing_score": 8.3,
       "engagement_score": 9.1, "flow_score": 8.5, "value_score": 8.2, "emotional_arc_score": 9.3,
       "mood": "inspirational", "hook_type": "intimate_moment", "ideal_platform": "reels",
       "reason": "Vulnerabilidad genuina. Calmado → vulnerabilidad emocional → mensaje poderoso. Closure perfecto.",
-      "hook": "El día que perdí todo, aprendí lo más importante.", "edit_recipe": "Soft lighting filter + captions serif elegantes + fade in lento + close-up cara emocional seg 3"}}
+      "hook": "El día que perdí todo, aprendí lo más importante.", "edit_recipe": "Soft lighting filter + captions serif elegantes + fade in lento + close-up cara emocional seg 3",
+      "hashtags": ["#motivacion", "#superacion", "#historiareal", "#inspiracion", "#reels"]}}
   ]
 }}
 ```"""
@@ -361,7 +391,8 @@ tiktok | reels | shorts | linkedin | twitter | landscape
       "emotional_start": "calm",
       "tension_point": "Segundo 15: ojos desorbitados, pausa dramática de 1s antes del reveal",
       "payoff": "Segundo 22: revelación escalofriante con reacción final",
-      "edit_recipe": "Zoom punch-in a cara de sorpresa seg 2 + freeze 0.5s + captions grandes del hook"
+      "edit_recipe": "Zoom punch-in a cara de sorpresa seg 2 + freeze 0.5s + captions grandes del hook",
+      "hashtags": ["#storytime", "#miedo", "#casaembrujada", "#viral", "#fyp"]
     }}
   ]
 }}
@@ -377,6 +408,9 @@ tiktok | reels | shorts | linkedin | twitter | landscape
 - Cada clip debe ser autocontenido con Emotional Arc completo
 - Hooks genéricos ("bienvenidos", "hola", "empecemos") = descartar, score bajo
 - Cada clip DEBE tener un hook visual en los primeros 1-3 segundos
+- `hashtags`: 4-6 hashtags de descubrimiento sobre el TEMA/CONTENIDO real del clip (no sobre por
+  qué es viral). Mezclá 1-2 de nicho específico del tema + 2-3 genéricos de alcance (ej. #fyp,
+  #viral, #parati) + 1 de la plataforma/mood si aplica. En minúsculas, sin espacios, sin acentos.
 - emotional_arc_score bajo (< 6.0) = clip probablemente aburrido o monótono
 - Idealmente inicia/termina en cambios de escena o silencios naturales
 
@@ -547,6 +581,7 @@ Identifica ahora los {num_clips} mejores clips:"""
                             hook_type=str(clip.get('hook_type', 'unknown')),
                             ideal_platform=str(clip.get('ideal_platform', 'tiktok')),
                             edit_recipe=str(clip.get('edit_recipe', '')),
+                            hashtags=_parse_hashtags(clip.get('hashtags')),
                         ))
                     except (ValueError, TypeError, KeyError) as e:
                         logger.warning(f"Clip inválido ignorado: {e}")
@@ -678,7 +713,8 @@ Al revisar los frames, enfócate en:
       "emotional_start": "calm|excited|frustrated|suspenseful",
       "tension_point": "descripción del momento de máxima emoción visible",
       "payoff": "descripción del payoff/resolución",
-      "edit_recipe": "instrucciones específicas basadas en la expresión facial/gesto visible"
+      "edit_recipe": "instrucciones específicas basadas en la expresión facial/gesto visible",
+      "hashtags": ["#tema-especifico-1", "#tema-especifico-2", "#fyp", "#viral", "#parati"]
     }}
   ]
 }}
@@ -687,6 +723,8 @@ Al revisar los frames, enfócate en:
 - Scores 1.0-10.0
 - Clips NO solapados (min 3s entre clips)
 - Hooks genéricos = descartar
+- hashtags: 4-6 hashtags sobre el TEMA real del clip (no sobre por qué es viral), minúsculas,
+  sin espacios ni acentos, mezclando nicho + alcance genérico (#fyp, #viral, #parati)
 
 Identifica los {num_clips} mejores clips:"""
 
@@ -742,6 +780,7 @@ Identifica los {num_clips} mejores clips:"""
                             hook_type=str(clip.get('hook_type', 'unknown')),
                             ideal_platform=str(clip.get('ideal_platform', 'tiktok')),
                             edit_recipe=str(clip.get('edit_recipe', '')),
+                            hashtags=_parse_hashtags(clip.get('hashtags')),
                         ))
                     except (ValueError, TypeError, KeyError) as e:
                         logger.warning(f"Clip inválido ignorado: {e}")
