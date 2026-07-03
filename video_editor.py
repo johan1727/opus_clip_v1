@@ -477,34 +477,34 @@ class VideoEditor:
             # Cleanup before fallback
             if final_video:
                 try: final_video.close()
-                except: pass
+                except Exception as _ce: logger.debug(f"Cleanup final_video: {_ce}")
             if video:
                 try: video.close()
-                except: pass
+                except Exception as _ce: logger.debug(f"Cleanup video: {_ce}")
             for clip in subtitle_clips:
                 try: clip.close()
-                except: pass
+                except Exception as _ce: logger.debug(f"Cleanup subtitle_clip: {_ce}")
             return self._burn_subtitles_ffmpeg(str(video_path), str(output_path), segments, style)
-            
+
         finally:
             if final_video:
                 try:
                     final_video.close()
-                except:
-                    pass
+                except Exception as _ce:
+                    logger.debug(f"Cleanup final_video (finally): {_ce}")
             if video:
                 try:
                     video.close()
-                except:
-                    pass
+                except Exception as _ce:
+                    logger.debug(f"Cleanup video (finally): {_ce}")
             for clip in subtitle_clips:
                 try:
                     clip.close()
-                except:
-                    pass
+                except Exception as _ce:
+                    logger.debug(f"Cleanup subtitle_clip (finally): {_ce}")
             import gc
             gc.collect()
-    
+
     def burn_karaoke_subtitles(
         self,
         video_path: str,
@@ -662,33 +662,33 @@ class VideoEditor:
             logger.warning(f"MoviePy karaoke falló ({e}), usando fallback ffmpeg drawtext...")
             if final_video:
                 try: final_video.close()
-                except: pass
+                except Exception as _ce: logger.debug(f"Cleanup final_video: {_ce}")
             if video:
                 try: video.close()
-                except: pass
+                except Exception as _ce: logger.debug(f"Cleanup video: {_ce}")
             for clip in subtitle_clips:
                 try: clip.close()
-                except: pass
+                except Exception as _ce: logger.debug(f"Cleanup subtitle_clip: {_ce}")
             # Convert word_segments to phrase segments for ffmpeg fallback
             phrase_segs = self._word_segs_to_phrases(word_segments)
             return self._burn_subtitles_ffmpeg(str(video_path), str(output_path), phrase_segs, style)
-            
+
         finally:
             if final_video:
                 try:
                     final_video.close()
-                except:
-                    pass
+                except Exception as _ce:
+                    logger.debug(f"Cleanup final_video (finally): {_ce}")
             if video:
                 try:
                     video.close()
-                except:
-                    pass
+                except Exception as _ce:
+                    logger.debug(f"Cleanup video (finally): {_ce}")
             for clip in subtitle_clips:
                 try:
                     clip.close()
-                except:
-                    pass
+                except Exception as _ce:
+                    logger.debug(f"Cleanup subtitle_clip (finally): {_ce}")
             import gc
             gc.collect()
     
@@ -1029,11 +1029,12 @@ class VideoEditor:
         track_faces: bool = False,
         subtitle_mode: str = "static",
         target_width: Optional[int] = None,
-        target_height: Optional[int] = None
+        target_height: Optional[int] = None,
+        style: Optional[SubtitleStyle] = None
     ) -> str:
         """
         Pipeline completo: crop a 9:16 + subtítulos.
-        
+
         Args:
             input_video: Video fuente completo
             output_path: Ruta de salida final
@@ -1043,7 +1044,8 @@ class VideoEditor:
             add_subtitles: Si quemar subtítulos
             track_faces: Activar seguimiento facial AI
             subtitle_mode: "static", "karaoke", "highlight" o "pop"
-            
+            style: Estilo de subtítulos a aplicar (opcional, usa self.subtitle_style si no se pasa)
+
         Returns:
             Ruta del video final
         """
@@ -1110,13 +1112,15 @@ class VideoEditor:
                     str(temp_crop),
                     str(output_path),
                     word_segments,
+                    style=style,
                     animation_mode=subtitle_mode
                 )
             else:
                 self.burn_subtitles_moviepy(
                     str(temp_crop),
                     str(output_path),
-                    adjusted_segments
+                    adjusted_segments,
+                    style=style
                 )
             
             # Limpiar temp

@@ -312,16 +312,47 @@ por clip — una feature core de Opus Clip que YA EXISTE en este proyecto. Pero:
    fallback hardcodeado original) está suspendida por Google — no hace daño dejarla (el pool la
    salta sola), pero conviene reemplazarla por una key nueva o quitarla de `.env` para no gastar el
    intento fallido en cada análisis. (Ver `.env` local — nunca en este archivo ni en git.)
-- **Zonas seguras de plataforma no consideradas**: TikTok/Reels/Shorts tapan con su propia UI
-  (botones de interacción, perfil, caption nativo) las zonas inferior-derecha y a veces superior
-  del video 9:16. Los subtítulos con `position: bottom` (estilo Minimal/Classic en `config.py`)
-  pueden quedar tapados por la UI nativa de la plataforma al publicar. No es urgente pero es una
-  optimización real de creador de contenido: dejar un margen inferior mayor (~20% de la altura)
-  libre de texto importante.
+- ✅ **Corregido (2026-07-02)**: zonas seguras de plataforma. Además de agregar el margen, se
+  encontró y arregló un bug mucho más grande en el camino: **el selector "Estilo Visual"
+  (Moderno/TikTok/Minimal/Clásico) en la UI de exportación no tenía ningún efecto real** —
+  `export_clips()` recibía `style_name` pero nunca lo pasaba a `_export_single_clip()` ni se
+  construía nunca un `SubtitleStyle` a partir de él; `create_viral_clip()` ni siquiera aceptaba un
+  parámetro `style`. Todos los clips exportados usaban el `SubtitleStyle()` default de
+  `VideoEditor` (`position="center"`) sin importar qué estilo eligiera el usuario. Fix:
+  - `video_editor.create_viral_clip()` ahora acepta `style: Optional[SubtitleStyle]` y lo pasa a
+    `burn_subtitles_moviepy`/`burn_karaoke_subtitles`.
+  - Nuevo `app.py:_subtitle_style_from_name()` convierte `style_name` → `SubtitleStyle` real leyendo
+    `config.SUBTITLE_STYLES`, y aplica `margin_vertical=220` (antes 100) para estilos con
+    `position="bottom"` (Minimal, Clásico) — la zona segura pedida originalmente.
+  - `style_name` ahora se propaga `export_clips()` → `_export_single_clip()` (secuencial y
+    paralelo vía `ThreadPoolExecutor`) → `create_viral_clip()`.
+  - Diseño thread-safe a propósito: cada llamada construye un `SubtitleStyle` nuevo en vez de
+    mutar `self.editor.subtitle_style` compartido, evitando una race condition con exportación
+    paralela de varios clips.
+  - Verificado: `_subtitle_style_from_name('minimal')` → `position=bottom, margin=220`;
+    `_subtitle_style_from_name('modern')` → `position=center, margin=100`; nombre inválido cae a
+    "modern" sin crashear.
+- ✅ **Corregido (2026-07-02)**: explicabilidad del score — el campo `reason` de Gemini (por qué el
+  clip tiene ese puntaje) nunca se mostraba en las cards del timeline, solo el hook y el número.
+  Se agregó una línea `💡 {reason}` (truncada a 110 chars) en `_build_clips_summary()`.
 - **Sin corte de silencios/pausas largas dentro de un clip** (distinto de "eliminar muletillas"):
   Opus Clip real acorta pausas largas de más de ~1-2s para mantener el ritmo. Hay
   `snap_to_silence` en `transcriber.py` pero es para no cortar a mitad de palabra al definir los
   bordes del clip, no para comprimir silencios internos. Posible feature futura, no urgente.
+
+### 🧹 Limpieza 2026-07-02
+- ✅ `app_old.py` eliminado (código muerto confirmado, sin referencias en ningún lado).
+- ✅ Los 6 `except: pass` desnudos de `video_editor.py` ahora son `except Exception as _ce:
+  logger.debug(...)`, cumpliendo la regla #2 de `claude.md`.
+- ✅ 10 de los 17 `except Exception as e` ahora también muestran `gr.Warning()`/toast visible al
+  usuario, no solo log de servidor. Los 4 restantes se dejaron con logging solamente, a propósito:
+  - `_export_single_clip` (corre dentro de `ThreadPoolExecutor` — el contexto de Gradio para
+    `gr.Warning`/`gr.Error` no propaga de forma confiable a threads manuales, riesgoso sin poder
+    probarlo en vivo con una exportación real fallida).
+  - `_build_captions_text` (duplicaría el warning que ya dispara `_generate_clip_metadata` para
+    el mismo fallo subyacente).
+  - Thumbnail de galería (fallback visual ya se auto-resuelve, no amerita alarmar al usuario).
+  - Precheck de video (ya tiene fallback de texto inline adecuado, evitar fatiga de toasts).
 
 ### Próximos pasos sugeridos (loop de mejora continua)
 - Cada vez que Claude Code trabaje en este proyecto y encuentre un bug/duda/decisión de

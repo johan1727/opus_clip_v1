@@ -16,7 +16,7 @@ import gradio as gr
 from config import config, SUPPORTED_VIDEO_FORMATS, ERRORS, SUCCESS, SUBTITLE_STYLES
 from transcriber import Transcriber
 from llm_analyzer import GeminiAnalyzer, ViralClip
-from video_editor import VideoEditor, FACE_TRACKING_AVAILABLE
+from video_editor import VideoEditor, FACE_TRACKING_AVAILABLE, SubtitleStyle
 from state_manager import StateManager, ProjectState, ClipState
 from subtitle_editor import SubtitleEditor, create_editor_from_transcription, PREDEFINED_STYLES
 from audio_analyzer import AudioAnalyzer
@@ -196,6 +196,7 @@ class OpusClipPro:
                     logger.info(f"✅ Audio energy: {len(audio_segments)} segments analizados")
             except Exception as e:
                 logger.warning(f"Audio analysis error: {e}")
+                gr.Warning(f"⚠️ Análisis de energía de audio omitido: {e}")
 
             progress(0.38, desc="🎬 Detectando cambios de escena...")
             try:
@@ -205,6 +206,7 @@ class OpusClipPro:
                         logger.info(f"✅ Scene detection: {len(scene_changes)} cambios detectados")
             except Exception as e:
                 logger.warning(f"Scene detection error: {e}")
+                gr.Warning(f"⚠️ Detección de escenas omitida: {e}")
 
             # Calculate engagement scores combining audio + scenes + transcription
             if audio_segments and not (analysis_mode == 'fast' or duration > 1800):
@@ -218,6 +220,7 @@ class OpusClipPro:
                         logger.info(f"   Peak at {e.timestamp:.0f}s: combined={e.combined_score:.1f}")
                 except Exception as e:
                     logger.warning(f"Engagement calculation error: {e}")
+                    gr.Warning(f"⚠️ Cálculo de engagement omitido: {e}")
 
             progress(0.40, desc="🧠 Analizando momentos virales con Gemini...")
 
@@ -236,6 +239,7 @@ class OpusClipPro:
                     progress(0.42, desc=f"🎬 {len(frames)} frames extraídos")
             except Exception as e:
                 logger.warning(f"No se pudieron extraer frames: {e}")
+                gr.Warning(f"⚠️ No se pudieron extraer frames clave, análisis solo con transcripción: {e}")
                 frames = []
 
             # Gemini analysis with all data
@@ -382,6 +386,7 @@ class OpusClipPro:
             
         except Exception as e:
             logger.error(f"Error in analysis: {e}", exc_info=True)
+            gr.Warning(f"❌ Falló el análisis: {e}")
             return f"❌ Error: {str(e)}", "", "", gr.update(visible=False), gr.update(choices=[]), "Error"
     
     def _score_color(self, score: float) -> str:
@@ -414,6 +419,7 @@ class OpusClipPro:
         for i, clip in enumerate(self.current_state.clips, 1):
             status_icon = "✅" if clip.selected else "⏸️"
             hook_preview = clip.hook[:80] + "..." if len(clip.hook) > 80 else clip.hook
+            reason_preview = clip.reason[:110] + "..." if len(clip.reason) > 110 else clip.reason
             score_color = self._score_color(clip.virality_score)
             h_color = self._score_color(clip.hook_score)
             p_color = self._score_color(clip.pacing_score)
@@ -455,6 +461,9 @@ class OpusClipPro:
                 </div>
                 <p style="margin: 0 0 8px 0; color: #a8d8ea; font-size: 0.88em;">
                     🎯 <em>{hook_preview}</em>
+                </p>
+                <p style="margin: 0 0 8px 0; color: #8fa3ab; font-size: 0.78em;" title="Por qué Gemini le dio este puntaje">
+                    💡 {reason_preview}
                 </p>
                 <p style="margin: 0 0 8px 0; color: #d4e5ed; font-size: 0.82em;">
                     ⏱️ {clip.start:.1f}s → {clip.end:.1f}s &nbsp;·&nbsp; {clip.duration:.1f}s
@@ -685,6 +694,7 @@ class OpusClipPro:
             return None
         except Exception as e:
             logger.error(f"generate_preview error: {e}", exc_info=True)
+            gr.Warning(f"⚠️ No se pudo generar la vista previa: {e}")
             return None
     
     def get_subtitle_data(self, clip_id: int) -> List[List[Any]]:
@@ -747,9 +757,31 @@ class OpusClipPro:
         data = self.get_subtitle_data(clip_id)
         return f"✅ {count} subtítulos mejorados con emojis", data
     
+    # Margen inferior (px) para subtítulos "bottom" — deja espacio libre para la UI nativa de
+    # TikTok/Reels/Shorts (caption, botones de interacción) que tapa esa zona al publicar.
+    SAFE_ZONE_MARGIN_BOTTOM = 220
+
+    def _subtitle_style_from_name(self, style_name: str) -> SubtitleStyle:
+        """Convierte el nombre de estilo elegido en la UI (modern/tiktok/minimal/classic) a un
+        SubtitleStyle real para el renderizado — antes este mapeo no existía y el picker de
+        estilo visual no tenía ningún efecto en el video exportado."""
+        preset = SUBTITLE_STYLES.get(style_name, SUBTITLE_STYLES["modern"])
+        margin_vertical = self.SAFE_ZONE_MARGIN_BOTTOM if preset.get("position") == "bottom" else 100
+        return SubtitleStyle(
+            font=preset.get("font", "C:/Windows/Fonts/arialbd.ttf"),
+            fontsize=preset.get("fontsize", 64),
+            color=preset.get("color", "white"),
+            stroke_color=preset.get("stroke_color", "black"),
+            stroke_width=preset.get("stroke_width", 3),
+            bg_color=preset.get("bg_color"),
+            position=preset.get("position", "center"),
+            margin_vertical=margin_vertical,
+        )
+
     def _export_single_clip(
         self,
         args: Tuple[int, Any],
+        style_name: str = "modern",
         track_faces: bool = False,
         subtitle_mode: str = "static",
         target_width: int = 1080,
@@ -787,7 +819,8 @@ class OpusClipPro:
                 self.current_video, base_out, clip_state.start, clip_state.end,
                 segments, add_subtitles=True, track_faces=track_faces,
                 subtitle_mode=subtitle_mode,
-                target_width=target_width, target_height=target_height
+                target_width=target_width, target_height=target_height,
+                style=self._subtitle_style_from_name(style_name)
             )
             current = base_out
 
@@ -877,6 +910,7 @@ class OpusClipPro:
             return str(srt_path)
         except Exception as e:
             logger.warning(f"No se pudo generar SRT para clip {index+1}: {e}")
+            gr.Warning(f"⚠️ No se pudo generar el SRT del clip {index+1}: {e}")
             return None
 
     def _generate_vtt(self, clip_state, index: int) -> Optional[str]:
@@ -903,6 +937,7 @@ class OpusClipPro:
             return str(vtt_path)
         except Exception as e:
             logger.warning(f"No se pudo generar VTT para clip {index+1}: {e}")
+            gr.Warning(f"⚠️ No se pudo generar el VTT del clip {index+1}: {e}")
             return None
 
     def _build_social_metadata(
@@ -968,6 +1003,7 @@ class OpusClipPro:
             return str(meta_path)
         except Exception as e:
             logger.warning(f"No se pudo generar metadata para clip {index+1}: {e}")
+            gr.Warning(f"⚠️ No se pudo generar metadata/caption del clip {index+1}: {e}")
             return None
 
     def _build_captions_text(
@@ -1052,6 +1088,7 @@ class OpusClipPro:
                         future = executor.submit(
                             self._export_single_clip,
                             (i, clip),
+                            style_name,
                             track_faces,
                             subtitle_mode,
                             target_width,
@@ -1085,7 +1122,7 @@ class OpusClipPro:
                 for i, clip_state in enumerate(selected_clips):
                     progress((i / total), desc=f"🎬 Exportando {i+1}/{total}...")
                     idx, result, success = self._export_single_clip(
-                        (i, clip_state), track_faces, subtitle_mode,
+                        (i, clip_state), style_name, track_faces, subtitle_mode,
                         target_width, target_height,
                         enable_mood_grade, enable_ducking,
                         brand_name, brand_color,
@@ -1152,6 +1189,7 @@ class OpusClipPro:
 
         except Exception as e:
             logger.error(f"Error en exportación: {e}", exc_info=True)
+            gr.Warning(f"❌ Falló la exportación: {e}")
             successful = [f for f in output_files if f is not None]
             return f"❌ Error: {str(e)}", [], successful, ""
     
