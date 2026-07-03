@@ -1,0 +1,33 @@
+# Entornos virtuales
+venv/
+env/
+.venv/
+
+# Secretos
+.env
+
+# Cache de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Archivos generados por la app
+output/
+outputs/
+temp/
+
+# Videos fuente y de trabajo (contenido personal/con copyright, no pertenece al repo)
+videos para editar/
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4v
+*.wmv
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

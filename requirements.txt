@@ -1,0 +1,34 @@
+# OpusClip Clone - Dependencias
+# Python 3.10+ requerido
+
+# UI
+gradio==4.44.0
+
+# Transcripción - Whisper (OpenAI)
+openai-whisper==20231117
+
+# LLM - Google Gemini
+google-generativeai==0.8.3
+
+# Edición de Video
+moviepy==1.0.3
+ffmpeg-python==0.2.0
+
+# Face Tracking
+opencv-contrib-python==4.13.0.92
+mediapipe==0.10.33
+
+# Audio Analysis (opcional - mejora detección viral + zoom dinámico)
+librosa==0.10.2
+numpy>=1.24.0
+
+# Utilidades
+python-dotenv==1.0.1
+tqdm==4.66.5
+
+# Typing
+typing-extensions==4.12.2
+
+# Dependencies implícitas de Whisper/PyTorch
+# torch se instala aparte con: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Para CUDA 12.1 (compatible con GTX 1080)
