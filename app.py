@@ -388,7 +388,64 @@ class OpusClipPro:
             logger.error(f"Error in analysis: {e}", exc_info=True)
             gr.Warning(f"❌ Falló el análisis: {e}")
             return f"❌ Error: {str(e)}", "", "", gr.update(visible=False), gr.update(choices=[]), "Error"
-    
+
+    def analyze_video_batch(
+        self,
+        video_paths: List[str],
+        num_clips: int,
+        min_duration: int,
+        max_duration: int,
+        model_size: str,
+        progress: gr.Progress,
+        custom_prompt: str = "",
+        analysis_mode: str = "balance",
+    ) -> Tuple[str, str, str, gr.update, gr.update, str]:
+        """
+        Analiza varios videos en secuencia (no en paralelo — Whisper compite por VRAM y
+        el pool de Gemini se satura si se lanzan varias llamadas a la vez). Cada video se
+        guarda como un proyecto separado vía `analyze_video()` (reutiliza toda la lógica
+        existente); al terminar, el estado activo queda en el último video procesado y el
+        resto queda disponible en "Proyectos Recientes" para cargarlos individualmente.
+
+        Returns: mismo shape que `analyze_video()` (status, clips_summary, analysis_summary,
+        timeline_visible, clip_choices, token_info) para no duplicar el cableado de UI.
+        """
+        total = len(video_paths)
+        if total == 1:
+            return self.analyze_video(
+                video_paths[0], num_clips, min_duration, max_duration, model_size,
+                progress, custom_prompt, analysis_mode
+            )
+
+        results: List[str] = []
+        last_result = None
+        for i, video_path in enumerate(video_paths):
+            video_name = Path(video_path).name
+
+            def _batch_progress(p: float, desc: str = "", _i=i) -> None:
+                progress((_i + p) / total, desc=f"[Video {_i+1}/{total}] {desc}")
+
+            try:
+                last_result = self.analyze_video(
+                    video_path, num_clips, min_duration, max_duration, model_size,
+                    _batch_progress, custom_prompt, analysis_mode
+                )
+                n_clips = len(self.current_state.clips) if self.current_state else 0
+                results.append(f"✅ {video_name}: {n_clips} clips")
+            except Exception as e:
+                logger.error(f"Error procesando '{video_name}' en el lote: {e}", exc_info=True)
+                gr.Warning(f"❌ Falló '{video_name}' en el lote: {e}")
+                results.append(f"❌ {video_name}: {e}")
+
+        progress(1.0, desc=f"✅ Lote completo: {total} videos procesados")
+        summary = "\n".join(results)
+        status = f"🎉 Lote completo ({total} videos):\n{summary}"
+
+        if last_result and self.current_state:
+            _, clips_sum, analysis_sum, timeline_vis, clip_dropdown, tokens = last_result
+            return status, clips_sum, analysis_sum, timeline_vis, clip_dropdown, tokens
+        return status, "", "", gr.update(visible=False), gr.update(choices=[]), "0 tokens"
+
     def _score_color(self, score: float) -> str:
         """Returns color based on score 0-10."""
         if score >= 8.5:
@@ -2570,8 +2627,9 @@ class OpusClipPro:
                                         with gr.Column(elem_classes=["upload-zone"]):
                                             # File upload with clean styling
                                             video_input = gr.File(
-                                                label="Arrastra video o haz clic para buscar",
+                                                label="Arrastra video(s) o hacé clic para buscar",
                                                 file_types=["video"],
+                                                file_count="multiple",
                                                 type="filepath"
                                             )
                                         
@@ -3065,10 +3123,19 @@ class OpusClipPro:
             
             # === EVENTOS ===
             
-            def on_video_select(video_path, model_sz):
-                """Precheck: show duration + ETA estimate when video is selected."""
-                if not video_path:
+            def on_video_select(video_paths, model_sz):
+                """Precheck: show duration + ETA estimate when video(s) are selected."""
+                if not video_paths:
                     return "", "No hay video seleccionado"
+                if len(video_paths) > 1:
+                    names = ", ".join(Path(v).name for v in video_paths[:3])
+                    more = f" y {len(video_paths) - 3} más" if len(video_paths) > 3 else ""
+                    html = f"""<div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:10px 14px;margin:8px 0;font-size:13px;color:#b9cac8;">
+                        <b style="color:#e4e1e6;">📦 {len(video_paths)} videos seleccionados</b><br>
+                        {names}{more} — se analizan uno por uno, cada uno queda como proyecto separado.
+                    </div>"""
+                    return html, f"📦 {len(video_paths)} videos en cola"
+                video_path = video_paths[0]
                 try:
                     self._init_components(model_size=model_sz)
                     info = self.transcriber.estimate_analysis_time(video_path, model_sz)
@@ -3099,12 +3166,12 @@ class OpusClipPro:
             def on_analyze(video, n_clips, min_dur, max_dur, model_sz, custom_p, mode, progress=gr.Progress()):
                 if not video:
                     return (
-                        "❌ Selecciona un video", "", "",
+                        "❌ Selecciona al menos un video", "", "",
                         gr.update(visible=False), gr.update(choices=[]), "0 tokens",
                         gr.update(interactive=True), gr.update(interactive=False),
                         "0 clips seleccionados", "→ Exportar clips (0)", "0/0 clips", gr.update(visible=False)
                     )
-                status, clips_sum, analysis_sum, timeline_vis, clip_dropdown, tokens = self.analyze_video(
+                status, clips_sum, analysis_sum, timeline_vis, clip_dropdown, tokens = self.analyze_video_batch(
                     video, n_clips, min_dur, max_dur, model_sz, progress,
                     custom_prompt=custom_p, analysis_mode=mode
                 )
@@ -3137,9 +3204,13 @@ class OpusClipPro:
                          analyze_btn, cancel_btn,
                          selected_count_txt, go_export_btn, selection_counter, selection_bar]
             ).then(
-                fn=lambda status: switch_tab("edit") if "clips identificados" in status else (gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)),
+                fn=lambda status: switch_tab("edit") if ("clips identificados" in status or "Lote completo" in status) else (gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)),
                 inputs=[analysis_status],
                 outputs=[tab_import, tab_editor_content, tab_export_content]
+            ).then(
+                fn=lambda: self.refresh_project_list(""),
+                inputs=[],
+                outputs=[recent_projects_html, saved_project_dropdown]
             )
 
             cancel_btn.click(

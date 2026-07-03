@@ -239,8 +239,25 @@ ducking, y overlay de marca/color — ver "Pendiente" arriba, corregido.
 **Roadmap priorizado (impacto vs. esfuerzo para creador solo):**
 1. **Pulir animación de subtítulos karaoke** — ya existe el scaffolding (`animation_mode`),
    revisar si el swap de TextClip se siente fluido o crudo comparado a Opus Clip real.
-2. **Carga por lotes (batch) de varios videos** — hoy `gr.File` es de un solo archivo;
-   mayor ausencia para un flujo de creador solo (subir 5 episodios y dejarlo correr).
+2. ✅ **Corregido (2026-07-03)**: carga por lotes. `video_input` ahora es `gr.File(file_count=
+   "multiple")`. Nuevo método `analyze_video_batch()` en `app.py` — procesa los videos EN
+   SECUENCIA (no en paralelo: Whisper compite por VRAM y el pool de Gemini se satura con
+   llamadas simultáneas), reutilizando `analyze_video()` sin cambios para cada uno. Cada video
+   queda guardado como un proyecto separado (vía `state_manager.create_project`, que ya generaba
+   un nombre único por timestamp); al terminar, el estado activo es el del último video, y el
+   resto queda disponible en "Proyectos Recientes" para cargar individualmente. Si un video falla
+   a mitad del lote, se loguea y sigue con el siguiente (no aborta todo el lote). Precheck de UI
+   adaptado: con 1 archivo muestra el ETA de siempre, con 2+ muestra "📦 N videos seleccionados"
+   con los nombres. Refresco automático de "Proyectos Recientes" al terminar el lote.
+   Decisión de diseño deliberada: NO se tocó la arquitectura de estado compartido (`current_state`
+   sigue siendo una sola instancia) — el batch simplemente LOOPEA el pipeline existente en vez de
+   intentar mantener N proyectos "activos" a la vez, evitando el riesgo ya documentado de estado
+   compartido entre sesiones.
+   **Verificado**: test con mocks (`analyze_video_batch` con 3 videos, uno forzado a fallar) —
+   los 3 se procesan igual, progreso escalado correctamente por video (ej. video 2/3 ocupa
+   [0.333, 0.667] del progress bar), mensaje final agrega ✅/❌ por video. Verificado en vivo con
+   Playwright: subir 2 archivos reales muestra "📦 2 videos seleccionados" con ambos nombres en
+   el precheck.
 3. **Errores visibles vía `gr.Error`/`gr.Warning`** en vez de texto plano en un textbox —
    esfuerzo bajo, mejora percepción de calidad.
 4. **Timeline con drag-to-trim** — hoy son campos numéricos de inicio/fin; el gap de UX
