@@ -77,10 +77,16 @@ opus-clip-clone/
 - Idioma: `es` (español)
 
 ### Gemini API
-- **ESTADO**: ✅ Key se carga desde `.env` (`GEMINI_API_KEY`), ya NO está hardcodeada en el código ni en este archivo (ver sección "Auditoría 2026-07-02" más abajo)
-- Modelo: `gemini-1.5-flash` (gratis, rápido)
+- **ESTADO**: ✅ Pool de 8 API keys en `.env` (`GEMINI_API_KEYS`, separadas por coma). Ya NO están
+  hardcodeadas en el código ni en este archivo (ver sección "Auditoría 2026-07-02" más abajo).
+- **Rotación automática**: `GeminiAnalyzer._generate_with_rotation()` en `llm_analyzer.py` detecta
+  errores 429/quota/rate-limit y rota a la siguiente key del pool automáticamente, sin intervención
+  del usuario. Si todas las keys agotan cuota, recién ahí falla.
+- Modelo: `gemini-2.5-flash`
 - Tarea: Analizar transcripción → JSON con timestamps + score viralidad
 - Archivo: `@/d:/TODO/opus clip v2/llm_analyzer.py`
+- **Nota (no urgente)**: `google.generativeai` (el SDK usado) está deprecado por Google en favor de
+  `google.genai`. Sigue funcionando pero conviene migrar en algún momento — no es prioridad ahora.
 
 ### Formato de Salida
 - Aspect ratio: 9:16 (vertical)
@@ -171,8 +177,8 @@ opus-clip-v2/
 ### 🔐 Seguridad — hallazgos y estado
 | Hallazgo | Severidad | Estado |
 |---|---|---|
-| Key de Gemini hardcodeada en `llm_analyzer.py` (fallback) | Crítico | ✅ Corregido — ahora solo lee `.env`, falla explícito si falta |
-| 7 keys de Gemini adicionales, reales y funcionales, hardcodeadas en `test_api.py` | Crítico | ✅ Corregido — reescrito para leer de `.env` |
+| Key de Gemini hardcodeada en `llm_analyzer.py` (fallback) | Crítico | ✅ Corregido — ahora solo lee `.env` (`GEMINI_API_KEYS`), falla explícito si falta |
+| 7 keys de Gemini adicionales, reales y funcionales, hardcodeadas en `test_api.py` | Crítico | ✅ Corregido — reescrito para leer de `.env`. Las 8 keys nunca llegaron a subirse a ningún lado (confirmado por el usuario), así que no había fuga real — el problema era solo el hardcodeo. Ahora forman un **pool con rotación automática** (`_generate_with_rotation` en `llm_analyzer.py`) que cambia de key sola si una pega un 429/rate-limit. |
 | Key en texto plano dentro de `memory.md` | Alto | ✅ Corregido — removida de este archivo |
 | No existía `.gitignore` (venv/, temp/, output/, videos con copyright, __pycache__ se hubieran subido) | Alto | ✅ Corregido — `.gitignore` creado |
 | `videos para editar/` y `temp/` contienen videos de terceros con copyright (~700MB, contenido de YouTube) | Medio | ✅ Excluidos vía `.gitignore`, nunca deben entrar al historial de git |
@@ -180,10 +186,9 @@ opus-clip-v2/
 | Sin `shell=True` / f-strings en llamadas a ffmpeg (`subprocess.run` con listas) | — | ✅ Sin riesgo de command injection, ya está bien hecho |
 | Sin uso de `pickle`/`eval`/`exec` | — | ✅ Sin riesgo de deserialización insegura |
 
-**⚠️ ACCIÓN PENDIENTE DEL USUARIO**: las 8 API keys de Gemini que estuvieron en texto plano
-(la de `llm_analyzer.py` + las 7 de `test_api.py`) deben considerarse potencialmente
-comprometidas — regenerarlas/revocarlas en [Google AI Studio](https://aistudio.google.com/apikey)
-y actualizar el valor en `.env` (nunca en el código).
+**Resuelto 2026-07-02**: las 8 keys nunca se subieron a git/GitHub (el repo no existía hasta este
+mismo día), así que no se consideran comprometidas — no hace falta rotarlas. Quedan como pool en
+`.env` (`GEMINI_API_KEYS`), fuera del historial de git.
 
 ### 🐛 Bugs / calidad de código — hallazgos
 - `video_editor.py:493,498,503,680,685,690` — seis `except: pass` desnudos en bloques `finally`

@@ -16,6 +16,9 @@ output/
 outputs/
 temp/
 
+# Grafo de conocimiento generado por graphify (regenerable con /graphify . --update)
+graphify-out/
+
 # Videos fuente y de trabajo (contenido personal/con copyright, no pertenece al repo)
 videos para editar/
 *.mp4

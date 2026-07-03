@@ -29,12 +29,28 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Load API key from environment variable (set it in a local .env file, see .env.example)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
+
+def _load_gemini_api_keys() -> List[str]:
+    """
+    Carga el pool de API keys de Gemini desde .env.
+    Soporta GEMINI_API_KEYS (varias, separadas por coma) o GEMINI_API_KEY (una sola).
+    """
+    keys_raw = os.getenv("GEMINI_API_KEYS", "")
+    keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
+    if not keys:
+        single = os.getenv("GEMINI_API_KEY", "").strip()
+        if single:
+            keys = [single]
+    return keys
+
+
+# Load API key(s) from environment variable (set en un .env local, ver .env.example)
+GEMINI_API_KEYS = _load_gemini_api_keys()
+if not GEMINI_API_KEYS:
     raise RuntimeError(
-        "GEMINI_API_KEY no está configurada. Copia .env.example a .env y agrega tu key."
+        "GEMINI_API_KEYS/GEMINI_API_KEY no está configurada. Copia .env.example a .env y agrega tus keys."
     )
+GEMINI_API_KEY = GEMINI_API_KEYS[0]
 
 
 @dataclass
@@ -95,21 +111,23 @@ class GeminiAnalyzer:
     ) -> None:
         """
         Inicializa el analizador Gemini.
-        
+
         Args:
-            api_key: API key de Gemini (usa env var GEMINI_API_KEY si es None)
+            api_key: API key de Gemini (usa el pool de env vars GEMINI_API_KEYS/GEMINI_API_KEY si es None)
             model_name: Modelo a usar ('gemini-2.5-flash' recomendado)
             temperature: Creatividad (0.0 = determinista, 1.0 = creativo)
             max_output_tokens: Máximo de tokens en respuesta
         """
-        self.api_key = api_key or GEMINI_API_KEY
+        self.api_keys: List[str] = [api_key] if api_key else list(GEMINI_API_KEYS)
+        self._key_index: int = 0
+        self.api_key = self.api_keys[0] if self.api_keys else ""
         self.model_name = model_name
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.model: Optional[genai.GenerativeModel] = None
-        
+
         # Validate API key exists
-        if not self.api_key or self.api_key == "":
+        if not self.api_key:
             raise ValueError(
                 "❌ GEMINI_API_KEY no está configurada.\n\n"
                 "Para configurar en Windows PowerShell:\n"
@@ -119,12 +137,15 @@ class GeminiAnalyzer:
                 "O permanentemente en Variables de Entorno del Sistema.\n\n"
                 "Obtén tu API key gratuita en: https://aistudio.google.com/app/apikey"
             )
-        
+
         self._configure_api()
-        logger.info(f"GeminiAnalyzer inicializado: modelo={model_name}")
-    
+        logger.info(
+            f"GeminiAnalyzer inicializado: modelo={model_name}, "
+            f"pool de {len(self.api_keys)} API key(s)"
+        )
+
     def _configure_api(self) -> None:
-        """Configura la API de Gemini con la key proporcionada."""
+        """Configura la API de Gemini con la key actual del pool."""
         try:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel(self.model_name)
@@ -132,7 +153,39 @@ class GeminiAnalyzer:
         except Exception as e:
             logger.error(f"Error configurando Gemini API: {e}")
             raise RuntimeError(f"No se pudo configurar Gemini: {e}")
-    
+
+    @staticmethod
+    def _is_quota_error(error: Exception) -> bool:
+        """Detecta si un error de Gemini es por rate-limit/cuota agotada (HTTP 429)."""
+        message = str(error).lower()
+        return any(marker in message for marker in ("429", "quota", "rate limit", "resource_exhausted"))
+
+    def _rotate_api_key(self) -> None:
+        """Avanza a la siguiente API key del pool y reconfigura el cliente Gemini."""
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        self.api_key = self.api_keys[self._key_index]
+        self._configure_api()
+        logger.info(f"Rotando a API key #{self._key_index + 1}/{len(self.api_keys)} por límite de cuota")
+
+    def _generate_with_rotation(self, prompt: Any, generation_config: GenerationConfig) -> Any:
+        """
+        Llama a Gemini generate_content, rotando de API key automáticamente si la
+        key actual devuelve error de cuota/rate-limit. Errores no relacionados con
+        cuota se re-lanzan de inmediato para que el backoff exponencial del llamador
+        los maneje.
+        """
+        last_error: Optional[Exception] = None
+        for _ in range(len(self.api_keys)):
+            try:
+                return self.model.generate_content(prompt, generation_config=generation_config)
+            except Exception as e:
+                last_error = e
+                if self._is_quota_error(e) and len(self.api_keys) > 1:
+                    self._rotate_api_key()
+                    continue
+                raise
+        raise RuntimeError(f"Todas las API keys de Gemini agotaron su cuota: {last_error}")
+
     def _build_prompt(
         self,
         transcription: Dict[str, Any],
@@ -456,7 +509,7 @@ Identifica ahora los {num_clips} mejores clips:"""
                 update_progress(0.1 * attempt, f" Analizando con Gemini (intento {attempt + 1}/{retry_attempts})...")
                 logger.info(f"Enviando análisis a Gemini (intento {attempt + 1}/{retry_attempts})...")
                 
-                response = self.model.generate_content(
+                response = self._generate_with_rotation(
                     prompt,
                     generation_config=GenerationConfig(
                         temperature=self.temperature,
@@ -464,10 +517,10 @@ Identifica ahora los {num_clips} mejores clips:"""
                         response_mime_type="application/json"
                     )
                 )
-                
+
                 response_text = response.text
                 logger.debug(f"Respuesta recibida: {response_text[:200]}...")
-                
+
                 update_progress(0.8, " Procesando respuesta...")
                 
                 # Parsear respuesta
@@ -651,7 +704,7 @@ Identifica los {num_clips} mejores clips:"""
                 if frames:
                     content.extend(frames[:8])  # Max 8 frames to avoid token limit
                 
-                response = self.model.generate_content(
+                response = self._generate_with_rotation(
                     content,
                     generation_config=GenerationConfig(
                         temperature=0.7,  # Higher creativity for visual analysis
