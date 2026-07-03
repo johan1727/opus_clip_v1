@@ -414,16 +414,24 @@ promesa central de la app.
    en esta plataforma. Fix: escapar `:` → `\:` en la ruta de la fuente antes de insertarla en el
    filtro (`font_path_escaped = font_path.replace(':', '\\:')`).
 
-### ⚠️ Issue conocido, NO arreglado — MoviePy con múltiples subtítulos sigue fallando
-Incluso con los 3 fixes de arriba, `burn_subtitles_moviepy` con **más de un** segmento de texto
-sigue tirando `'NoneType' object has no attribute 'get_frame'` al componer varios `TextClip` con
-`.with_start()/.with_end()` distintos en un `CompositeVideoClip` (probado: 1 segmento funciona,
-7-10 segmentos fallan). No se investigó a fondo — cae correctamente al fallback de ffmpeg
-drawtext (que ya funciona tras el fix #3), así que el resultado final es correcto, pero se pierde
-la calidad/estilo superior de MoviePy (fondo semi-transparente, fuentes TTF con antialiasing,
-composición) en favor del drawtext más básico de ffmpeg. Pendiente investigar si es un bug de
-MoviePy 2.1.2 o un uso incorrecto de la API en este archivo — probablemente relacionado a cómo
-`CompositeVideoClip` maneja huecos de tiempo donde ningún clip de texto está activo.
+### ✅ Resuelto (2026-07-02, sesión siguiente) — MoviePy con múltiples subtítulos
+Causa raíz encontrada: **`burn_subtitles_moviepy` y `burn_karaoke_subtitles` cerraban el clip
+base (`video.close()`) INMEDIATAMENTE después de armar el `CompositeVideoClip`, antes de
+`write_videofile()`**. En MoviePy 1.x esto aparentemente no rompía nada, pero en 2.x los frames
+se leen de forma perezosa recién durante la escritura — el composite necesita `video` todavía
+abierto en ese momento. Con 1 solo segmento a veces no fallaba (posible carrera/orden de reads),
+pero con 7-10 segmentos siempre tiraba `'NoneType' object has no attribute 'get_frame'`.
+Fix: se eliminó el `close()` prematuro en ambos métodos — el `finally` ya existente se encarga de
+cerrar `video`/`final_video` después de que `write_videofile()` termina. De paso se encontró y
+arregló otra rotura de la migración 1.x→2.x: `.fadein()/.fadeout()` en `burn_karaoke_subtitles`
+ya no existen como métodos en MoviePy 2.x, ahora son efectos (`from moviepy.video.fx import
+FadeIn, FadeOut`, aplicados vía `.with_effects([FadeIn(d), FadeOut(d)])`).
+**Verificado con video real**: `burn_subtitles_moviepy` con 7 segmentos y `burn_karaoke_subtitles`
+con 11 palabras ahora completan sin caer al fallback de ffmpeg ("Video con subtítulos guardado" /
+"Video karaoke guardado", sin el warning previo). Pipeline completo (`create_viral_clip` con
+`compress_pauses=True` + subtítulos) probado de punta a punta: crop con audio ✅, pausas
+comprimidas ✅, subtítulos quemados directo con MoviePy (calidad superior, sin fallback) ✅,
+audio+video sincronizados en el archivo final ✅.
 
 ### Próximos pasos sugeridos (loop de mejora continua)
 - Cada vez que Claude Code trabaje en este proyecto y encuentre un bug/duda/decisión de

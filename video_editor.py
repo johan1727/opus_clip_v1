@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import ffmpeg
 from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
 from moviepy.video.fx.Crop import Crop as crop
+from moviepy.video.fx import FadeIn, FadeOut
 
 # Configurar logging PRIMERO (antes de cualquier uso de logger)
 logging.basicConfig(
@@ -515,11 +516,12 @@ class VideoEditor:
             
             # Componer video final
             final_video = CompositeVideoClip([video] + subtitle_clips, size=video.size)
-            
-            # Liberar video original antes de exportar (reduce memoria)
-            video.close()
-            video = None
-            
+
+            # NOTA: no cerrar `video` acá — CompositeVideoClip lee sus frames de forma
+            # perezosa durante write_videofile en MoviePy 2.x, así que cerrarlo antes de
+            # exportar deja al composite sin video ('NoneType' object has no attribute
+            # 'get_frame'). Se cierra en el `finally` de abajo, después de exportar.
+
             # Exportar
             final_video.write_videofile(
                 str(output_path),
@@ -531,7 +533,7 @@ class VideoEditor:
                 threads=4,
                 logger=None  # Silenciar logs de moviepy
             )
-            
+
             logger.info(f"Video con subtítulos guardado: {output_path}")
             return str(output_path)
             
@@ -696,16 +698,15 @@ class VideoEditor:
                     
                     # Efecto de fade in/out suave
                     fade_duration = min(0.12 if animation_mode == "pop" else 0.1, (word_end - word_start) / 4)
-                    word_highlight = word_highlight.fadein(fade_duration).fadeout(fade_duration)
+                    word_highlight = word_highlight.with_effects([FadeIn(fade_duration), FadeOut(fade_duration)])
                     
                     subtitle_clips.append(word_highlight)
             
             # Componer video
             final_video = CompositeVideoClip([video] + subtitle_clips, size=video.size)
-            
-            video.close()
-            video = None
-            
+
+            # NOTA: no cerrar `video` acá — ver comentario equivalente en burn_subtitles_moviepy.
+
             # Exportar
             final_video.write_videofile(
                 str(output_path),
@@ -717,7 +718,7 @@ class VideoEditor:
                 threads=4,
                 logger=None
             )
-            
+
             logger.info(f"🎤 Video karaoke guardado: {output_path}")
             return str(output_path)
             

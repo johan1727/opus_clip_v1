@@ -34,3 +34,6 @@ videos para editar/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Estado local de Claude Code (locks de tareas programadas, etc.)
+.claude/
