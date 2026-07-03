@@ -247,6 +247,55 @@ ducking, y overlay de marca/color — ver "Pendiente" arriba, corregido.
 8. Librería de música de fondo (hoy solo hay ducking de una pista ya agregada, no inserción).
 9. B-roll/stock footage — baja prioridad, ni el Opus Clip real lo hace mucho.
 
+### 👁️ Revisión visual real (Playwright, 2026-07-02) — no solo código
+Se lanzó la app y se tomaron screenshots de las 3 pantallas (Importar/Editar/Exportar) para
+revisar la UI tal como la ve el usuario, no solo leyendo el código de `app.py`.
+
+**Bugs de UX confirmados visualmente:**
+- **🔴 Tab "Exportar" se ve completamente vacío** cuando no hay clips seleccionados — ni un
+  mensaje de estado. Contrasta con "Editar", que sí muestra "Analiza un video para ver clips
+  detectados". Un usuario que hace click en "Exportar" antes de tiempo ve una pantalla en blanco
+  y puede pensar que la app está rota. **Fix sugerido**: mismo patrón de placeholder que "Editar".
+- **Nav lateral "Recursos 🔒" y "Ajustes 🔒"** están permanentemente bloqueados/grises — prometen
+  funciones que no existen. Para uso 100% personal es inofensivo, pero si el proyecto se muestra
+  a alguien más (o se piensa compartir), da sensación de producto a medio terminar. O se ocultan
+  hasta que existan, o se quitan del nav.
+- **Footer expone "Construido con Gradio" + "Usar vía API"** — rompe la ilusión de producto
+  pulido tipo SaaS que el resto del diseño (header "OpusClip Pro V2.4 Powered by AI", badge de
+  tokens, campana de notificaciones) sí logra. Fix de una línea: `footer{display:none}` en el CSS
+  custom que ya existe, o `show_api=False` en `ui.launch()`.
+- Header tiene badge "1,200 Tokens", campana y avatar de perfil — decorativos, no hacen nada.
+  Coherente con la estética "SaaS" que se buscó, pero si en algún momento confunden al usuario
+  (¿por qué no cambia el contador de tokens?), vale la pena quitarlos o cablearlos a algo real.
+- Timeline confirma visualmente el hallazgo de código: son barras estáticas + campos numéricos
+  Inicio(s)/Fin(s), no hay drag-to-trim (ya en el roadmap #4).
+
+**Hallazgo de contenido viral (experto UX + growth IG/YT/TT) — el mayor gap real de producto:**
+`app.py:_generate_clip_metadata` (línea ~908) **ya genera** título, descripción, hashtags y CTA
+por clip — una feature core de Opus Clip que YA EXISTE en este proyecto. Pero:
+1. **Está mal expuesta**: se escribe a un `.json` que se agrega a la lista de descargas del
+   `gr.File`, no se muestra como texto legible/copiable en la UI. Un creador necesita copiar y
+   pegar el caption directo a TikTok/IG al momento de publicar — obligarlo a abrir un JSON
+   descargado mata el ahorro de tiempo que la feature debería dar. **Fix sugerido**: agregar un
+   `gr.Textbox` (o Markdown con botón de copiar) por clip en el panel de exportación mostrando
+   título + caption + hashtags listos para pegar.
+2. **Calidad de los hashtags es débil**: se extraen de `hook + reason` (el texto que Gemini
+   genera para *explicar por qué el clip es viral*, ej. "Ojos desorbitados de sorpresa"), no del
+   *tema* real del clip. Esto puede producir hashtags como `#desorbitados` en vez de hashtags de
+   descubrimiento reales (`#storytime`, `#viral`, tema del video). **Fix sugerido**: pedirle a
+   Gemini hashtags explícitos en el mismo prompt de análisis (ya devuelve JSON estructurado, es
+   agregar un campo `hashtags` al schema) en vez de derivarlos con regex del texto de rationale.
+- **Zonas seguras de plataforma no consideradas**: TikTok/Reels/Shorts tapan con su propia UI
+  (botones de interacción, perfil, caption nativo) las zonas inferior-derecha y a veces superior
+  del video 9:16. Los subtítulos con `position: bottom` (estilo Minimal/Classic en `config.py`)
+  pueden quedar tapados por la UI nativa de la plataforma al publicar. No es urgente pero es una
+  optimización real de creador de contenido: dejar un margen inferior mayor (~20% de la altura)
+  libre de texto importante.
+- **Sin corte de silencios/pausas largas dentro de un clip** (distinto de "eliminar muletillas"):
+  Opus Clip real acorta pausas largas de más de ~1-2s para mantener el ritmo. Hay
+  `snap_to_silence` en `transcriber.py` pero es para no cortar a mitad de palabra al definir los
+  bordes del clip, no para comprimir silencios internos. Posible feature futura, no urgente.
+
 ### Próximos pasos sugeridos (loop de mejora continua)
 - Cada vez que Claude Code trabaje en este proyecto y encuentre un bug/duda/decisión de
   producto, agregarlo a este archivo con fecha antes de cerrar la sesión.
