@@ -64,8 +64,61 @@ class SubtitleStyle:
     margin_vertical: int = 100
     max_width_ratio: float = 0.9  # 90% del ancho del video
     line_spacing: int = 10
-    
-    
+
+
+# ----------------------------------------------------------------------
+# F4 — Compresión de pausas largas (silencios entre frases dentro de un clip)
+# ----------------------------------------------------------------------
+
+def compute_keep_ranges(
+    segments: List[Dict[str, Any]],
+    clip_duration: float,
+    max_gap: float = 1.2,
+    target_gap: float = 0.35,
+) -> List[Tuple[float, float]]:
+    """
+    Calcula los rangos [start, end) del clip a conservar, comprimiendo los huecos
+    de silencio entre segmentos de diálogo consecutivos que superen `max_gap`
+    segundos a solo `target_gap` segundos (no se eliminan del todo, para que el
+    corte no se sienta abrupto). `segments` debe tener timestamps relativos al
+    clip (0 = inicio del clip), no al video original.
+
+    Devuelve una lista de un solo rango [(0, clip_duration)] si no hay ningún
+    hueco que comprimir.
+    """
+    if not segments:
+        return [(0.0, clip_duration)]
+    sorted_segs = sorted(segments, key=lambda s: s['start'])
+    keep_ranges = []
+    cursor = 0.0
+    for i in range(len(sorted_segs) - 1):
+        seg_end = min(sorted_segs[i]['end'], clip_duration)
+        next_start = min(sorted_segs[i + 1]['start'], clip_duration)
+        gap = next_start - seg_end
+        if gap > max_gap:
+            keep_ranges.append((cursor, seg_end + target_gap / 2))
+            cursor = next_start - target_gap / 2
+    keep_ranges.append((cursor, clip_duration))
+    return [(max(0.0, s), min(clip_duration, e)) for s, e in keep_ranges if e > s]
+
+
+def remap_to_compressed(t: float, keep_ranges: List[Tuple[float, float]]) -> float:
+    """
+    Convierte un timestamp del clip original a su posición en el timeline
+    comprimido resultante de aplicar `compute_keep_ranges`. Solo da resultados
+    exactos para timestamps que caen dentro de un rango conservado (que es
+    siempre el caso para los timestamps de segmentos de diálogo, por construcción
+    de `compute_keep_ranges`).
+    """
+    cumulative = 0.0
+    for (s, e) in keep_ranges:
+        if t <= e:
+            offset = max(0.0, t - s)
+            return cumulative + min(offset, e - s)
+        cumulative += (e - s)
+    return cumulative
+
+
 class VideoEditor:
     """
     Editor de video para crear clips virales en formato 9:16.
@@ -313,41 +366,46 @@ class VideoEditor:
         )
         
         try:
+            # ¿El video fuente tiene pista de audio? (algunos screen recordings no la tienen)
+            probe = ffmpeg.probe(str(input_path))
+            has_audio = any(s['codec_type'] == 'audio' for s in probe.get('streams', []))
+
             # Construir comando FFmpeg
-            stream = ffmpeg.input(
+            input_node = ffmpeg.input(
                 str(input_path),
                 ss=start_time,
                 t=duration
             )
-            
-            stream = ffmpeg.filter(
-                stream,
+
+            video_stream = ffmpeg.filter(
+                input_node.video,
                 'crop',
                 w=new_width,
                 h=new_height,
                 x=x_offset,
                 y=y_offset
             )
-            
-            stream = ffmpeg.filter(
-                stream,
+
+            video_stream = ffmpeg.filter(
+                video_stream,
                 'scale',
                 w=target_width,
                 h=target_height,
                 force_original_aspect_ratio='disable'
             )
-            
+
             # Construir parámetros de salida según codec
             output_kwargs = {
                 'vcodec': self.config.codec,
-                'acodec': self.config.audio_codec,
                 'video_bitrate': self.config.video_bitrate,
-                'audio_bitrate': self.config.audio_bitrate,
                 'r': self.config.fps,
                 'pix_fmt': 'yuv420p',
                 'movflags': 'faststart'
             }
-            
+            if has_audio:
+                output_kwargs['acodec'] = self.config.audio_codec
+                output_kwargs['audio_bitrate'] = self.config.audio_bitrate
+
             # NVENC no soporta CRF ni presets libx264
             if self.hw_accel:
                 output_kwargs['preset'] = self.config.preset  # p1-p7 para NVENC
@@ -355,15 +413,20 @@ class VideoEditor:
             else:
                 output_kwargs['preset'] = self.config.preset
                 output_kwargs['crf'] = self.config.crf
-            
-            stream = ffmpeg.output(stream, str(output_path), **output_kwargs)
-            
+
+            # IMPORTANTE: hay que mapear el stream de audio explícitamente además del de
+            # video, si no ffmpeg-python solo mapea el video filtrado y el clip sale mudo.
+            if has_audio:
+                stream = ffmpeg.output(video_stream, input_node.audio, str(output_path), **output_kwargs)
+            else:
+                stream = ffmpeg.output(video_stream, str(output_path), **output_kwargs)
+
             # Ejecutar
             ffmpeg.run(stream, overwrite_output=True, quiet=True)
-            
-            logger.info(f"Video crop guardado: {output_path}")
+
+            logger.info(f"Video crop guardado: {output_path} (audio: {'sí' if has_audio else 'sin pista de audio en la fuente'})")
             return str(output_path)
-            
+
         except ffmpeg.Error as e:
             logger.error(f"Error FFmpeg: {e.stderr.decode() if e.stderr else str(e)}")
             raise RuntimeError(f"FFmpeg falló: {e}")
@@ -429,21 +492,21 @@ class VideoEditor:
                 
                 # Posicionar
                 if style.position == "center":
-                    txt_clip = txt_clip.set_position('center')
+                    txt_clip = txt_clip.with_position('center')
                 elif style.position == "bottom":
-                    txt_clip = txt_clip.set_position(('center', video.h - txt_clip.h - style.margin_vertical))
+                    txt_clip = txt_clip.with_position(('center', video.h - txt_clip.h - style.margin_vertical))
                 elif style.position == "top":
-                    txt_clip = txt_clip.set_position(('center', style.margin_vertical))
+                    txt_clip = txt_clip.with_position(('center', style.margin_vertical))
                 
                 # Duración
-                txt_clip = txt_clip.set_start(start).set_end(end)
+                txt_clip = txt_clip.with_start(start).with_end(end)
                 
                 # Fondo opcional
                 if style.bg_color:
                     bg = ColorClip(
                         size=(txt_clip.w + 40, txt_clip.h + 20),
                         color=style.bg_color
-                    ).set_start(start).set_end(end).set_position(
+                    ).with_start(start).with_end(end).with_position(
                         lambda t: txt_clip.pos(t) if callable(txt_clip.pos) else txt_clip.pos
                     )
                     subtitle_clips.append(bg)
@@ -578,13 +641,13 @@ class VideoEditor:
                 
                 # Posicionar
                 if style.position == "center":
-                    base_clip = base_clip.set_position('center')
+                    base_clip = base_clip.with_position('center')
                 elif style.position == "bottom":
-                    base_clip = base_clip.set_position(('center', video.h - base_clip.h - style.margin_vertical))
+                    base_clip = base_clip.with_position(('center', video.h - base_clip.h - style.margin_vertical))
                 elif style.position == "top":
-                    base_clip = base_clip.set_position(('center', style.margin_vertical))
+                    base_clip = base_clip.with_position(('center', style.margin_vertical))
                 
-                base_clip = base_clip.set_start(segment_start).set_end(segment_end)
+                base_clip = base_clip.with_start(segment_start).with_end(segment_end)
                 subtitle_clips.append(base_clip)
                 
                 # Crear clips individuales para cada palabra (highlight)
@@ -622,14 +685,14 @@ class VideoEditor:
                     
                     # Misma posición que base
                     if style.position == "center":
-                        word_highlight = word_highlight.set_position('center')
+                        word_highlight = word_highlight.with_position('center')
                     elif style.position == "bottom":
-                        word_highlight = word_highlight.set_position(('center', video.h - word_highlight.h - style.margin_vertical))
+                        word_highlight = word_highlight.with_position(('center', video.h - word_highlight.h - style.margin_vertical))
                     elif style.position == "top":
-                        word_highlight = word_highlight.set_position(('center', style.margin_vertical))
+                        word_highlight = word_highlight.with_position(('center', style.margin_vertical))
                     
                     # Solo visible durante el tiempo de la palabra
-                    word_highlight = word_highlight.set_start(word_start).set_end(word_end)
+                    word_highlight = word_highlight.with_start(word_start).with_end(word_end)
                     
                     # Efecto de fade in/out suave
                     fade_duration = min(0.12 if animation_mode == "pop" else 0.1, (word_end - word_start) / 4)
@@ -718,6 +781,10 @@ class VideoEditor:
         """Quema subtítulos usando ffmpeg drawtext — no depende de fuentes del sistema."""
         style = style or self.subtitle_style
         font_path = style.font if Path(style.font).exists() else "C:/Windows/Fonts/arialbd.ttf"
+        # Escapar ':' en la ruta (ej. "C:/Windows/...") — el parser de filtros de ffmpeg
+        # usa ':' como separador de opciones, así que una ruta de Windows sin escapar
+        # rompe el filtro entero ("Error parsing a filter description").
+        font_path_escaped = font_path.replace(':', '\\:')
         fontsize = style.fontsize
         color = style.color.lstrip('#') if style.color else 'white'
         # ffmpeg color format: 0xRRGGBB or named
@@ -740,7 +807,7 @@ class VideoEditor:
             t_end = seg['end']
             border = style.stroke_width
             filters.append(
-                f"drawtext=fontfile='{font_path}':text='{text_esc}'"
+                f"drawtext=fontfile='{font_path_escaped}':text='{text_esc}'"
                 f":fontsize={fontsize}:fontcolor={fc}"
                 f":borderw={border}:bordercolor=black"
                 f":x=(w-text_w)/2:y=(h-text_h)/2"
@@ -1030,7 +1097,10 @@ class VideoEditor:
         subtitle_mode: str = "static",
         target_width: Optional[int] = None,
         target_height: Optional[int] = None,
-        style: Optional[SubtitleStyle] = None
+        style: Optional[SubtitleStyle] = None,
+        compress_pauses: bool = False,
+        max_pause_gap: float = 1.2,
+        target_pause_gap: float = 0.35,
     ) -> str:
         """
         Pipeline completo: crop a 9:16 + subtítulos.
@@ -1045,20 +1115,23 @@ class VideoEditor:
             track_faces: Activar seguimiento facial AI
             subtitle_mode: "static", "karaoke", "highlight" o "pop"
             style: Estilo de subtítulos a aplicar (opcional, usa self.subtitle_style si no se pasa)
+            compress_pauses: Si comprimir pausas/silencios largos entre frases (F4)
+            max_pause_gap: Huecos entre frases mayores a esto (segundos) se comprimen
+            target_pause_gap: A cuántos segundos se comprime cada hueco largo
 
         Returns:
             Ruta del video final
         """
         input_video = Path(input_video)
         output_path = Path(output_path)
-        
+
         # Archivo temporal para el crop
         temp_crop = output_path.parent / f"temp_crop_{output_path.stem}.mp4"
-        
+
         try:
             # Paso 1: Crop a 9:16 con FFmpeg (rápido)
             logger.info(f"Creando clip viral: {start_time:.1f}s - {end_time:.1f}s")
-            
+
             self.crop_to_vertical_ffmpeg(
                 str(input_video),
                 str(temp_crop),
@@ -1068,29 +1141,47 @@ class VideoEditor:
                 target_height or self.config.height,
                 track_faces=track_faces
             )
-            
-            if not add_subtitles:
-                # Renombrar temp a final
-                temp_crop.rename(output_path)
-                return str(output_path)
-            
+
             # Paso 2: Ajustar timestamps de segmentos al clip recortado
             adjusted_segments = []
             for seg in segments:
                 adj_start = seg['start'] - start_time
                 adj_end = seg['end'] - start_time
-                
+
                 # Solo incluir segmentos dentro del clip
                 if adj_end > 0 and adj_start < (end_time - start_time):
                     adj_start = max(0, adj_start)
                     adj_end = min(end_time - start_time, adj_end)
-                    
+
                     adjusted_segments.append({
                         'start': adj_start,
                         'end': adj_end,
                         'text': seg['text']
                     })
-            
+
+            # Paso 2.5: Comprimir pausas largas (F4), si se pidió
+            if compress_pauses:
+                try:
+                    clip_duration = end_time - start_time
+                    keep_ranges = compute_keep_ranges(
+                        adjusted_segments, clip_duration, max_pause_gap, target_pause_gap
+                    )
+                    if len(keep_ranges) > 1:
+                        compressed_crop = output_path.parent / f"temp_paused_{output_path.stem}.mp4"
+                        self.compress_pauses(str(temp_crop), str(compressed_crop), keep_ranges)
+                        temp_crop.unlink()
+                        temp_crop = compressed_crop
+                        for seg in adjusted_segments:
+                            seg['start'] = remap_to_compressed(seg['start'], keep_ranges)
+                            seg['end'] = remap_to_compressed(seg['end'], keep_ranges)
+                except Exception as e:
+                    logger.warning(f"Compresión de pausas omitida: {e}")
+
+            if not add_subtitles:
+                # Renombrar temp (posiblemente ya comprimido) a final
+                temp_crop.rename(output_path)
+                return str(output_path)
+
             # Paso 3: Quemar subtítulos según modo
             if subtitle_mode in ("karaoke", "highlight", "pop"):
                 # Convertir a formato palabra por palabra
@@ -1190,6 +1281,74 @@ class VideoEditor:
             return output_path
         except Exception as e:
             logger.warning(f"Color grading falló ({e}), usando original")
+            import shutil
+            shutil.copy2(input_path, output_path)
+            return output_path
+
+    # ------------------------------------------------------------------
+    # F4 — Compresión de pausas largas (mantiene el ritmo del clip)
+    # ------------------------------------------------------------------
+
+    def compress_pauses(
+        self,
+        input_path: str,
+        output_path: str,
+        keep_ranges: List[Tuple[float, float]],
+    ) -> str:
+        """
+        Recorta y concatena los rangos de `keep_ranges` del video de entrada,
+        eliminando físicamente el resto (los huecos de silencio comprimidos por
+        `compute_keep_ranges`). Si `keep_ranges` es un solo rango (nada que
+        comprimir), copia el archivo tal cual.
+        """
+        if len(keep_ranges) <= 1:
+            import shutil
+            shutil.copy2(input_path, output_path)
+            return output_path
+        try:
+            input_stream = ffmpeg.input(str(input_path))
+            parts = []
+            for seg_start, seg_end in keep_ranges:
+                v = input_stream.video.filter('trim', start=seg_start, end=seg_end).filter('setpts', 'PTS-STARTPTS')
+                a = input_stream.audio.filter('atrim', start=seg_start, end=seg_end).filter('asetpts', 'PTS-STARTPTS')
+                parts.append(v)
+                parts.append(a)
+            joined = ffmpeg.concat(*parts, v=1, a=1).node
+            out_v, out_a = joined[0], joined[1]
+
+            output_kwargs = {
+                'vcodec': self.config.codec,
+                'acodec': self.config.audio_codec,
+                'video_bitrate': self.config.video_bitrate,
+                'audio_bitrate': self.config.audio_bitrate,
+                'r': self.config.fps,
+                'pix_fmt': 'yuv420p',
+                'movflags': 'faststart',
+                'loglevel': 'warning',
+            }
+            if self.hw_accel:
+                output_kwargs['preset'] = self.config.preset
+            else:
+                output_kwargs['preset'] = self.config.preset
+                output_kwargs['crf'] = self.config.crf
+
+            (
+                ffmpeg
+                .output(out_v, out_a, str(output_path), **output_kwargs)
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+            saved = sum((e - s) for s, e in keep_ranges)
+            logger.info(f"✂️ Pausas comprimidas: {len(keep_ranges)} segmentos conservados, {saved:.1f}s de duración final")
+            return output_path
+        except ffmpeg.Error as e:
+            stderr = e.stderr.decode(errors='replace') if e.stderr else str(e)
+            logger.warning(f"Compresión de pausas falló (ffmpeg): {stderr[-800:]}, usando clip sin comprimir")
+            import shutil
+            shutil.copy2(input_path, output_path)
+            return output_path
+        except Exception as e:
+            logger.warning(f"Compresión de pausas falló ({e}), usando clip sin comprimir")
             import shutil
             shutil.copy2(input_path, output_path)
             return output_path

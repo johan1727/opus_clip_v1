@@ -354,8 +354,80 @@ por clip — una feature core de Opus Clip que YA EXISTE en este proyecto. Pero:
   - Thumbnail de galería (fallback visual ya se auto-resuelve, no amerita alarmar al usuario).
   - Precheck de video (ya tiene fallback de texto inline adecuado, evitar fatiga de toasts).
 
+## 🎬 Feature F4: Compresión de pausas largas (2026-07-02)
+
+Nueva feature del roadmap UX, implementada y probada con video real (`videos para editar/1 Hour
+of IshowSpeed Funny Moments.mp4`, clip de 45s extraído con ffmpeg + `silencedetect` real).
+
+- `video_editor.py`: funciones módulo-nivel `compute_keep_ranges()` y `remap_to_compressed()`
+  (puro Python, sin ffmpeg — comprime huecos >`max_gap` (1.2s default) entre segmentos de diálogo
+  consecutivos a solo `target_gap` (0.35s default), sin eliminarlos del todo para que no se sienta
+  abrupto) + método `VideoEditor.compress_pauses()` (ffmpeg trim+concat vía `ffmpeg-python`,
+  patrón: `input.video.filter('trim',...).filter('setpts','PTS-STARTPTS')` +
+  `input.audio.filter('atrim',...).filter('asetpts','PTS-STARTPTS')` por cada rango a conservar,
+  unidos con `ffmpeg.concat(*parts, v=1, a=1)`).
+- `create_viral_clip()` acepta `compress_pauses`/`max_pause_gap`/`target_pause_gap`; si está
+  activado, comprime el crop ANTES de quemar subtítulos y remapea los timestamps de los
+  segmentos (así los subtítulos quedan sincronizados con el timeline comprimido).
+- UI: checkbox "✂️ Comprimir pausas largas (F4)" en el panel de exportación, cableado
+  `export_clips()` → `_export_single_clip()` → `create_viral_clip()`.
+- **Validado con video real**: clip de prueba de 45s con pausas reales (detectadas con
+  `ffmpeg silencedetect`) comprimido a 36.9s, cada segmento de diálogo remapeado con duración
+  exacta preservada (sin drift), audio y video sincronizados en el archivo final (verificado con
+  `ffprobe`, diferencia de duración audio/video < 0.02s).
+- Diseño intencional: no elimina silencios del todo (deja `target_gap` de buffer) para que el
+  corte no se sienta como un jump-cut brusco — más parecido a como lo hace Opus Clip real.
+
+## 🔴 Bugs CRÍTICOS pre-existentes encontrados mientras se probaba F4 con video real (2026-07-02)
+
+Ninguno de estos tres bugs tiene que ver con la feature de compresión de pausas — se
+descubrieron porque F4 fue la primera vez que se probó el pipeline de exportación completo
+contra un video real durante una sesión de Claude Code (las auditorías anteriores fueron de
+código/UI, no de video generado). Son independientes entre sí pero los tres bloqueaban la
+promesa central de la app.
+
+1. ✅ **CRÍTICO — `crop_to_vertical_ffmpeg()` producía clips SIN AUDIO, siempre.**
+   El código armaba el filtro de crop+scale sobre el stream de video (`ffmpeg.filter(stream,
+   'crop', ...)`) pero nunca pasaba el stream de audio del input a `ffmpeg.output()` — el comando
+   ffmpeg compilado no tenía ningún `-map` de audio. Esto significa que **todos los clips
+   exportados por esta app, desde siempre, salían mudos** (confirmado con `ffprobe`: el output
+   del crop solo tenía `codec_type=video`, cero streams de audio). Fix: separar explícitamente
+   `input_node.video` (para los filtros de crop/scale) de `input_node.audio`, detectar si la
+   fuente tiene audio (`ffmpeg.probe()`), y pasar ambos streams a `ffmpeg.output()` cuando
+   corresponda. Verificado: el crop ahora tiene `codec_type=video` + `codec_type=audio`.
+2. ✅ **CRÍTICO — quemado de subtítulos vía MoviePy roto por completo (API 1.x vs 2.x).**
+   `requirements.txt` pineaba `moviepy==1.0.3` pero el venv real tiene `2.1.2` instalado (mismo
+   patrón de drift que ya se vio con gradio). MoviePy 2.x renombró todos los métodos mutadores
+   `set_*` a `with_*` (`set_position`→`with_position`, `set_start`→`with_start`,
+   `set_end`→`with_end`). El código seguía usando la API vieja → `AttributeError` en cada llamada,
+   cayendo siempre al fallback de ffmpeg drawtext. Fix: reemplazadas las 13 ocurrencias de
+   `.set_position/.set_start/.set_end` por `.with_position/.with_start/.with_end` en
+   `burn_subtitles_moviepy` y `burn_karaoke_subtitles`. `requirements.txt` actualizado a
+   `moviepy==2.1.2` para que coincida con lo que realmente corre.
+3. ✅ **CRÍTICO — el fallback de ffmpeg drawtext (Windows) también fallaba.**
+   Con el bug #2 arreglado, apareció este: `fontfile='C:/Windows/Fonts/arialbd.ttf'` rompe el
+   parser de filtros de ffmpeg porque `:` es el separador de opciones del filtro, y las rutas de
+   Windows tienen `C:` sin escapar. Error real: `"Error parsing a filter description"` (el mensaje
+   de error que se logueaba antes solo mostraba los últimos 500 caracteres del stderr, ocultando
+   la causa real al principio del mensaje). Esto significa que en Windows, **ni el camino
+   principal (MoviePy) ni el fallback (ffmpeg drawtext) funcionaban** — subtítulos rotos al 100%
+   en esta plataforma. Fix: escapar `:` → `\:` en la ruta de la fuente antes de insertarla en el
+   filtro (`font_path_escaped = font_path.replace(':', '\\:')`).
+
+### ⚠️ Issue conocido, NO arreglado — MoviePy con múltiples subtítulos sigue fallando
+Incluso con los 3 fixes de arriba, `burn_subtitles_moviepy` con **más de un** segmento de texto
+sigue tirando `'NoneType' object has no attribute 'get_frame'` al componer varios `TextClip` con
+`.with_start()/.with_end()` distintos en un `CompositeVideoClip` (probado: 1 segmento funciona,
+7-10 segmentos fallan). No se investigó a fondo — cae correctamente al fallback de ffmpeg
+drawtext (que ya funciona tras el fix #3), así que el resultado final es correcto, pero se pierde
+la calidad/estilo superior de MoviePy (fondo semi-transparente, fuentes TTF con antialiasing,
+composición) en favor del drawtext más básico de ffmpeg. Pendiente investigar si es un bug de
+MoviePy 2.1.2 o un uso incorrecto de la API en este archivo — probablemente relacionado a cómo
+`CompositeVideoClip` maneja huecos de tiempo donde ningún clip de texto está activo.
+
 ### Próximos pasos sugeridos (loop de mejora continua)
 - Cada vez que Claude Code trabaje en este proyecto y encuentre un bug/duda/decisión de
   producto, agregarlo a este archivo con fecha antes de cerrar la sesión.
 - Re-ejecutar la auditoría de bugs pendiente (arriba) cuando haya presupuesto de sesión.
 - Decidir sobre `GRADIO_SERVER_NAME` (arriba) y actualizar esta tabla cuando se resuelva.
+- Investigar el issue de MoviePy `CompositeVideoClip` con múltiples subtítulos (arriba).

@@ -791,6 +791,7 @@ class OpusClipPro:
         brand_name: str = "",
         brand_color: str = "#00f2ea",
         enable_zoom_cues: bool = False,
+        compress_pauses: bool = False,
     ) -> Tuple[int, str, bool]:
         """
         Exporta un solo clip con post-procesamiento opcional:
@@ -820,7 +821,8 @@ class OpusClipPro:
                 segments, add_subtitles=True, track_faces=track_faces,
                 subtitle_mode=subtitle_mode,
                 target_width=target_width, target_height=target_height,
-                style=self._subtitle_style_from_name(style_name)
+                style=self._subtitle_style_from_name(style_name),
+                compress_pauses=compress_pauses
             )
             current = base_out
 
@@ -1043,6 +1045,7 @@ class OpusClipPro:
         enable_mood_grade: bool = True,
         enable_ducking: bool = True,
         enable_zoom_cues: bool = False,
+        compress_pauses: bool = False,
     ) -> Tuple[str, List, List[str], str]:
         """
         Exporta clips seleccionados, soporta procesamiento paralelo.
@@ -1098,6 +1101,7 @@ class OpusClipPro:
                             brand_name,
                             brand_color,
                             enable_zoom_cues,
+                            compress_pauses,
                         )
                         future_to_index[future] = i
                     
@@ -1126,7 +1130,7 @@ class OpusClipPro:
                         target_width, target_height,
                         enable_mood_grade, enable_ducking,
                         brand_name, brand_color,
-                        enable_zoom_cues,
+                        enable_zoom_cues, compress_pauses,
                     )
                     if success:
                         output_files[idx] = result
@@ -2984,6 +2988,12 @@ class OpusClipPro:
                                             value=False,
                                             show_label=True
                                         )
+                                        compress_pauses_checkbox = gr.Checkbox(
+                                            label="✂️ Comprimir pausas largas (F4)",
+                                            value=False,
+                                            show_label=True,
+                                            info="Acorta silencios de +1.2s entre frases para mantener el ritmo"
+                                        )
 
                                         # Brand kit básico
                                         gr.HTML("""<div style="margin-top: 16px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px;">
@@ -3328,16 +3338,16 @@ class OpusClipPro:
             )
             
             export_btn.click(
-                fn=lambda style, sub_mode, face_track, platform, srt, vtt, brand, brand_color, mood_grade, ducking, zoom, prog=gr.Progress(): self.export_clips(
+                fn=lambda style, sub_mode, face_track, platform, srt, vtt, brand, brand_color, mood_grade, ducking, zoom, pauses, prog=gr.Progress(): self.export_clips(
                     style, prog, parallel=True, track_faces=face_track, subtitle_mode=sub_mode,
                     platform=platform, export_srt=srt, export_vtt=vtt,
                     brand_name=brand, brand_color=brand_color,
                     enable_mood_grade=mood_grade, enable_ducking=ducking,
-                    enable_zoom_cues=zoom
+                    enable_zoom_cues=zoom, compress_pauses=pauses
                 ),
                 inputs=[style_dropdown, subtitle_mode_dropdown, face_tracking_checkbox, platform_preset,
                         export_srt_checkbox, export_vtt_checkbox, brand_name_input, brand_color_input,
-                        mood_grade_checkbox, audio_ducking_checkbox, zoom_cues_checkbox],
+                        mood_grade_checkbox, audio_ducking_checkbox, zoom_cues_checkbox, compress_pauses_checkbox],
                 outputs=[export_status, output_gallery, output_files, captions_output]
             )
             
