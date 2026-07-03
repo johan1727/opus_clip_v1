@@ -190,18 +190,38 @@ opus-clip-v2/
 mismo día), así que no se consideran comprometidas — no hace falta rotarlas. Quedan como pool en
 `.env` (`GEMINI_API_KEYS`), fuera del historial de git.
 
-### 🐛 Bugs / calidad de código — hallazgos
+### 🐛 Bugs / calidad de código — hallazgos (auditoría profunda 2026-07-02, re-ejecutada)
 - `video_editor.py:493,498,503,680,685,690` — seis `except: pass` desnudos en bloques `finally`
   de limpieza de recursos moviepy (cerrar `final_video`, `video`, `subtitle_clips`). Es un patrón
   defendible (best-effort cleanup) pero viola la regla propia de `claude.md` #2 (nunca `except:`
-  vacío). Fix sugerido: `except Exception: logger.debug(...)` en vez de `except: pass`.
-- Auditoría de bugs más profunda (threading en callbacks de progreso, `state_manager.py`,
-  timestamps/boundaries de clips) quedó **incompleta** — el agente se cortó por límite de sesión.
-  Pendiente re-ejecutar en la próxima sesión: revisar `app.py` (3297 líneas, el archivo más
-  grande) a fondo, especialmente los ~15 bloques `except Exception as e` que hoy solo devuelven
-  strings a un textbox en vez de usar `gr.Error`/`gr.Warning`.
-- `app_old.py` (22KB) — verificar si sigue siendo referenciado desde algún lado o es código muerto
-  que debería eliminarse (regla #10 de `claude.md`: sin código muerto).
+  vacío). **Pendiente**: `except Exception: logger.debug(...)` en vez de `except: pass`.
+- `app_old.py` (22KB) — código muerto casi duplicado de `app.py` (misma clase `OpusClipPro`),
+  confirmado también por graphify (nodo "surprising connection" `app_old.py` ↔ `app.py`).
+  **Pendiente**: eliminarlo (regla #10 de `claude.md`).
+- **🔴 CRÍTICO — estado compartido entre sesiones de Gradio** (`app.py:3284`): la app crea **una
+  sola instancia** de `OpusClipPro()` y todos los usuarios/pestañas comparten sus atributos
+  mutables (`self.current_state`, `self.current_video`, `self.cancel_requested`,
+  `self.subtitle_editors`). Si dos pestañas/usuarios usan la app a la vez, uno puede pisar el
+  video/clips del otro, o cancelar el análisis del otro. Hoy es uso personal de una sola persona
+  así que el impacto es bajo, pero si `GRADIO_SERVER_NAME` se deja en `0.0.0.0` (ver tabla de
+  seguridad arriba) y se accede desde el celular *y* la PC a la vez, ya se dispara.
+  **Fix (no aplicado, requiere refactor mayor)**: mover `current_state`/`current_video`/
+  `subtitle_editors`/`cancel_requested` a `gr.State()` por sesión en vez de atributos de `self`.
+- **🟠 ALTO — export de clips no aísla fallos por etapa** (`app.py:806-821`, `_export_single_clip`):
+  solo el paso de zoom cues tiene try/except propio con fallback; ducking/mood-grade/branding no
+  lo tienen, así que si cualquiera falla, se descarta el clip completo (incluyendo el crop+subtítulos
+  que ya habían salido bien). **Fix (no aplicado)**: try/except individual por paso, igual que zoom cues.
+- ✅ **Corregido**: `StateManager.save_state()` (`state_manager.py`) ahora usa `threading.Lock()` +
+  escritura atómica (`os.replace`) para evitar JSON corrupto por escrituras concurrentes.
+- ✅ **Corregido**: `on_video_select` (`app.py`, precheck de video) ya loguea el error en vez de
+  descartarlo silenciosamente.
+- ✅ **Corregido**: `toggle_clip_selection`/`on_select_clip` y los `clip_choices` de los dropdowns
+  (`app.py`, 3 sitios) ahora usan `clip.id` de forma consistente en vez de mezclar índice de lista
+  con id — evita que seleccionar/togglear el clip equivocado una vez se implemente reordenar
+  (`state_manager.reorder_clips` ya existe pero no está cableado a la UI todavía).
+- ✅ **Corregido**: type hint faltante en `load_saved_project` (`app.py`).
+- Quedan **17** bloques `except Exception as e` que devuelven strings planos a un textbox en vez
+  de `gr.Error`/`gr.Warning` — ya priorizado como roadmap UX #3 más abajo, esfuerzo bajo.
 
 ### 🎨 UX/UI — realidad vs. documentación
 El proyecto está más avanzado de lo que `memory.md` indicaba antes de esta auditoría:

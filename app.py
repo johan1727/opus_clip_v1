@@ -369,7 +369,7 @@ class OpusClipPro:
             analysis_summary = self._build_analysis_summary(viral_clips, duration, num_segments)
             token_info = f"~{total_tokens} tokens usados"
             
-            clip_choices = [(f"🎬 Clip {i+1} (Puntaje: {c.virality_score:.1f})", i) for i, c in enumerate(self.current_state.clips)]
+            clip_choices = [(f"🎬 Clip {i+1} (Puntaje: {c.virality_score:.1f})", c.id) for i, c in enumerate(self.current_state.clips)]
             
             return (
                 f"✅ {len(viral_clips)} clips identificados",
@@ -570,7 +570,9 @@ class OpusClipPro:
             projects = [p for p in projects if query.lower() in p.lower()]
         return self._build_projects_dashboard(query), gr.update(choices=projects, value=projects[0] if projects else None)
 
-    def load_saved_project(self, project_name: str):
+    def load_saved_project(
+        self, project_name: str
+    ) -> Tuple[str, str, str, gr.update, str, gr.update, gr.update, gr.update]:
         """Loads a saved project into the editor and switches to Edit tab."""
         _no_tab = gr.update(), gr.update(), gr.update()
         if not project_name:
@@ -588,7 +590,7 @@ class OpusClipPro:
             self.subtitle_editors[clip_state.id] = editor
         clips_summary = self._build_clips_summary()
         analysis_summary = self._build_analysis_summary(self.current_state.clips, self.current_state.total_duration, len(self.current_state.transcription.get('segments', [])))
-        clip_choices = [(f"🎬 Clip {i+1} (Puntaje: {c.virality_score:.1f})", i) for i, c in enumerate(self.current_state.clips)]
+        clip_choices = [(f"🎬 Clip {i+1} (Puntaje: {c.virality_score:.1f})", c.id) for i, c in enumerate(self.current_state.clips)]
         return (
             f"✅ Proyecto cargado: {project_name}", clips_summary, analysis_summary,
             gr.update(choices=clip_choices, value=0), f"Video: {Path(state.video_path).name}",
@@ -608,7 +610,9 @@ class OpusClipPro:
         """Toggle selection for a single clip and return updated UI elements."""
         if not self.current_state:
             return "", "", "0 clips seleccionados", "→ Exportar clips (0)"
-        clip = self.current_state.clips[clip_id]
+        clip = next((c for c in self.current_state.clips if c.id == clip_id), None)
+        if clip is None:
+            return "❌ Clip no encontrado", "", "0 clips seleccionados", "→ Exportar clips (0)"
         new_state = not clip.selected
         success = self.state_manager.update_clip(clip_id, selected=new_state)
         if success:
@@ -2970,6 +2974,7 @@ class OpusClipPro:
                     vi_text = f"⏱️ {dur:.1f} min | ETA ~{mode_str} (balance)"
                     return html, vi_text
                 except Exception as e:
+                    logger.warning(f"Precheck de video falló: {e}")
                     return "", f"Video seleccionado: {Path(video_path).name if video_path else ''}"
 
             video_input.change(
@@ -3095,7 +3100,9 @@ class OpusClipPro:
             def on_select_clip(clip_id):
                 if not self.current_state:
                     return "No hay proyecto activo", [], 0, 0
-                clip = self.current_state.clips[clip_id]
+                clip = next((c for c in self.current_state.clips if c.id == clip_id), None)
+                if clip is None:
+                    return "Clip no encontrado", [], 0, 0
                 sc = self._score_color(clip.virality_score)
                 hc = self._score_color(clip.hook_score)
                 pc = self._score_color(clip.pacing_score)

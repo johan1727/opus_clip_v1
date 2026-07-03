@@ -5,6 +5,8 @@ Guarda y carga el estado de edición entre sesiones.
 
 import json
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
@@ -79,6 +81,7 @@ class StateManager:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.current_state: Optional[ProjectState] = None
+        self._save_lock = threading.Lock()
     
     def create_project(
         self,
@@ -188,11 +191,15 @@ class StateManager:
             'language': state.language
         }
         
-        # Guardar archivo
+        # Guardar archivo de forma atómica (escribe a un temp y reemplaza)
+        # para evitar que dos callbacks concurrentes dejen el JSON truncado/corrupto.
         state_file = self.state_dir / f"{state.project_name}.json"
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(state_dict, f, ensure_ascii=False, indent=2)
-        
+        tmp_file = state_file.with_suffix(".json.tmp")
+        with self._save_lock:
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                json.dump(state_dict, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, state_file)
+
         logger.info(f"Estado guardado: {state_file}")
         return str(state_file)
     
