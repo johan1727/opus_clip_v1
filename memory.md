@@ -141,6 +141,7 @@ opus-clip-v2/
 | 2026-04-21 | Módulos transcriber, llm_analyzer, video_editor, config, app | Claude |
 | 2026-04-21 | UI OpusClip Pro: state_manager, subtitle_editor, app.py rediseñado | Claude |
 | 2026-07-02 | Auditoría seguridad/bugs/UX + remediación de 8 API keys expuestas + .gitignore + primer push a GitHub | Claude |
+| 2026-07-03 | Creado `AGENT.md` como índice del loop de mejora continua (apunta a este archivo y a claude.md, no duplica contenido) | Claude |
 
 ## Características de OpusClip Pro
 
