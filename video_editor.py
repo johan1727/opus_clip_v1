@@ -649,6 +649,46 @@ class VideoEditor:
             import gc
             gc.collect()
 
+    def _group_words_into_chunks(
+        self,
+        word_segments: List[Dict[str, Any]],
+        max_words_per_chunk: int = 4,
+        target_chunk_duration: float = 0.9,
+    ) -> List[Dict[str, Any]]:
+        """
+        Reagrupa word_segments (ya con timestamps reales) en chunks de 2-4
+        palabras para el modo de animación "Viral" (estilo MrBeast/Hormozi/
+        Submagic: pocas palabras grandes en pantalla, no la frase completa).
+        No inventa timestamps — cada palabra conserva su start/end original;
+        solo se reasignan parent_id/word_index para que cada chunk actúe
+        como su propio "segmento padre" en burn_karaoke_subtitles.
+        """
+        if not word_segments:
+            return []
+        ordered = sorted(word_segments, key=lambda w: (w.get('parent_id', 0), w.get('word_index', 0)))
+        chunks: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = []
+        for w in ordered:
+            current.append(w)
+            chunk_duration = current[-1]['end'] - current[0]['start']
+            if len(current) >= max_words_per_chunk or chunk_duration >= target_chunk_duration:
+                chunks.append(current)
+                current = []
+        if current:
+            chunks.append(current)
+
+        regrouped = []
+        for chunk_id, words in enumerate(chunks):
+            for word_index, w in enumerate(words):
+                regrouped.append({
+                    'start': w['start'],
+                    'end': w['end'],
+                    'text': w['text'],
+                    'parent_id': chunk_id,
+                    'word_index': word_index,
+                })
+        return regrouped
+
     def burn_karaoke_subtitles(
         self,
         video_path: str,
@@ -676,7 +716,10 @@ class VideoEditor:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         style = style or self.subtitle_style
-        
+
+        if animation_mode == "viral":
+            word_segments = self._group_words_into_chunks(word_segments)
+
         logger.info(f"🎤 Quemando subtítulos {animation_mode}: {len(word_segments)} palabras")
         
         subtitle_clips = []
@@ -708,7 +751,7 @@ class VideoEditor:
                 segment_end = words[-1]['end']
                 
                 # Crear clip de texto completo (fondo/base)
-                base_color = 'gray' if animation_mode in ("karaoke", "highlight") else style.color
+                base_color = 'gray' if animation_mode in ("karaoke", "highlight", "viral") else style.color
                 base_clip = TextClip(
                     text=full_text,
                     font_size=style.fontsize,
@@ -750,7 +793,7 @@ class VideoEditor:
                     
                     # Crear clip compuesto: prefix + highlight + suffix
                     # Simplificación: solo mostrar la palabra destacada encima
-                    highlight_fontsize = int(style.fontsize * 1.18) if animation_mode == "pop" else style.fontsize
+                    highlight_fontsize = int(style.fontsize * 1.18) if animation_mode in ("pop", "viral") else style.fontsize
                     highlight_bg = "#ffea0044" if animation_mode == "highlight" else None
                     word_highlight = TextClip(
                         text=word_text,
@@ -1316,7 +1359,7 @@ class VideoEditor:
                 return str(output_path)
 
             # Paso 3: Quemar subtítulos según modo
-            if subtitle_mode in ("karaoke", "highlight", "pop"):
+            if subtitle_mode in ("karaoke", "highlight", "pop", "viral"):
                 # Convertir a formato palabra por palabra
                 word_segments = []
                 for seg in adjusted_segments:

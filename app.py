@@ -3132,6 +3132,7 @@ class OpusClipPro:
                                                         ("Karaoke", "karaoke"),
                                                         ("Highlight", "highlight"),
                                                         ("Pop", "pop"),
+                                                        ("🔥 Viral (chunks 2-4 palabras)", "viral"),
                                                     ],
                                                     value="static",
                                                     label="",
