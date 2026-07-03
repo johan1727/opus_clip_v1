@@ -237,38 +237,25 @@ ya existen face-tracking (crop inteligente), subtítulos animados karaoke/highli
 1080x1080, Landscape 1920x1080), grading de color por mood, zoom cues automáticos, audio
 ducking, y overlay de marca/color — ver "Pendiente" arriba, corregido.
 
-**Roadmap priorizado (impacto vs. esfuerzo para creador solo):**
-1. **Pulir animación de subtítulos karaoke** — ya existe el scaffolding (`animation_mode`),
-   revisar si el swap de TextClip se siente fluido o crudo comparado a Opus Clip real.
-2. ✅ **Corregido (2026-07-03)**: carga por lotes. `video_input` ahora es `gr.File(file_count=
-   "multiple")`. Nuevo método `analyze_video_batch()` en `app.py` — procesa los videos EN
-   SECUENCIA (no en paralelo: Whisper compite por VRAM y el pool de Gemini se satura con
-   llamadas simultáneas), reutilizando `analyze_video()` sin cambios para cada uno. Cada video
-   queda guardado como un proyecto separado (vía `state_manager.create_project`, que ya generaba
-   un nombre único por timestamp); al terminar, el estado activo es el del último video, y el
-   resto queda disponible en "Proyectos Recientes" para cargar individualmente. Si un video falla
-   a mitad del lote, se loguea y sigue con el siguiente (no aborta todo el lote). Precheck de UI
-   adaptado: con 1 archivo muestra el ETA de siempre, con 2+ muestra "📦 N videos seleccionados"
-   con los nombres. Refresco automático de "Proyectos Recientes" al terminar el lote.
-   Decisión de diseño deliberada: NO se tocó la arquitectura de estado compartido (`current_state`
-   sigue siendo una sola instancia) — el batch simplemente LOOPEA el pipeline existente en vez de
-   intentar mantener N proyectos "activos" a la vez, evitando el riesgo ya documentado de estado
-   compartido entre sesiones.
-   **Verificado**: test con mocks (`analyze_video_batch` con 3 videos, uno forzado a fallar) —
-   los 3 se procesan igual, progreso escalado correctamente por video (ej. video 2/3 ocupa
-   [0.333, 0.667] del progress bar), mensaje final agrega ✅/❌ por video. Verificado en vivo con
-   Playwright: subir 2 archivos reales muestra "📦 2 videos seleccionados" con ambos nombres en
-   el precheck.
-3. **Errores visibles vía `gr.Error`/`gr.Warning`** en vez de texto plano en un textbox —
-   esfuerzo bajo, mejora percepción de calidad.
-4. **Timeline con drag-to-trim** — hoy son campos numéricos de inicio/fin; el gap de UX
-   más "se siente como Opus Clip real" pero requiere componente HTML/JS custom.
-5. **Explicabilidad del score de viralidad** — verificar si el campo `reason` que ya
-   devuelve Gemini se muestra en las cards del timeline o solo el número.
-6. Undo/redo de ediciones (state_manager.py ya persiste estado, extenderlo es esfuerzo medio).
-7. Atajos de teclado (espacio=play/pause, flechas=nudge) — después del timeline (#4).
-8. Librería de música de fondo (hoy solo hay ducking de una pista ya agregada, no inserción).
-9. B-roll/stock footage — baja prioridad, ni el Opus Clip real lo hace mucho.
+**Roadmap actualizado (2026-07-03) — solo lo que sigue pendiente de verdad:**
+
+✅ Ya resueltos desde la versión original de esta lista (no repetir como pendientes):
+carga por lotes, errores visibles vía `gr.Warning`, explicabilidad del score, corte de pausas.
+
+Pendiente, de mayor a menor impacto para un creador solo:
+1. **Timeline con drag-to-trim** — hoy son campos numéricos de inicio/fin en vez de arrastrar
+   para cortar. El gap de UX más "se siente como Opus Clip real", pero requiere un componente
+   HTML/JS custom (Gradio no tiene uno nativo) — el más grande y riesgoso de verificar sin que
+   el usuario lo prueba interactuando en el navegador. Deliberadamente pospuesto.
+2. **Pulir animación de subtítulos karaoke** — el scaffolding (`animation_mode`) ya funciona
+   (verificado con MoviePy real tras el fix de `video.close()`), pero no se evaluó si el
+   swap de `TextClip` se siente fluido o crudo comparado a Opus Clip real.
+3. Undo/redo de ediciones (state_manager.py ya persiste estado, extenderlo es esfuerzo medio).
+4. Atajos de teclado (espacio=play/pause, flechas=nudge) — depende de tener timeline (#1) primero.
+5. Librería de música de fondo (hoy solo hay ducking de una pista ya agregada, no inserción).
+6. B-roll/stock footage — baja prioridad, ni el Opus Clip real lo hace mucho.
+7. Los 4 `except Exception` que quedaron sin `gr.Warning` a propósito (ver sección de limpieza
+   más abajo) — bajo riesgo, no urgente.
 
 ### 👁️ Revisión visual real (Playwright, 2026-07-02) — no solo código
 Se lanzó la app y se tomaron screenshots de las 3 pantallas (Importar/Editar/Exportar) para
@@ -353,10 +340,8 @@ por clip — una feature core de Opus Clip que YA EXISTE en este proyecto. Pero:
 - ✅ **Corregido (2026-07-02)**: explicabilidad del score — el campo `reason` de Gemini (por qué el
   clip tiene ese puntaje) nunca se mostraba en las cards del timeline, solo el hook y el número.
   Se agregó una línea `💡 {reason}` (truncada a 110 chars) en `_build_clips_summary()`.
-- **Sin corte de silencios/pausas largas dentro de un clip** (distinto de "eliminar muletillas"):
-  Opus Clip real acorta pausas largas de más de ~1-2s para mantener el ritmo. Hay
-  `snap_to_silence` en `transcriber.py` pero es para no cortar a mitad de palabra al definir los
-  bordes del clip, no para comprimir silencios internos. Posible feature futura, no urgente.
+- ✅ **Corregido (2026-07-02)**: corte de silencios/pausas largas dentro de un clip — implementado
+  como Feature F4 (ver sección más abajo), ya no es un pendiente.
 
 ### 🧹 Limpieza 2026-07-02
 - ✅ `app_old.py` eliminado (código muerto confirmado, sin referencias en ningún lado).
