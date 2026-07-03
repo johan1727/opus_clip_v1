@@ -799,9 +799,55 @@ class Transcriber:
                 'end': seg_end,
                 'text': seg['text'].strip()
             })
-        
+
         return filtered
-    
+
+    def has_real_word_timing(self, transcription: Dict[str, Any]) -> bool:
+        """
+        True si transcription['word_segments'] tiene granularidad de PALABRA
+        real (la transcripción completa corrió con word_timestamps=True, ej.
+        modo Calidad), no solo un fallback de una entrada por frase. Se
+        detecta comparando cantidades: si Whisper partió por palabra, hay
+        más word_segments que segments de frase; si no, ambas listas miden
+        lo mismo (_flatten_word_segments cae a 1:1 sin datos de palabra).
+        """
+        word_segments = transcription.get('word_segments', [])
+        segments = transcription.get('segments', [])
+        return len(segments) > 0 and len(word_segments) > len(segments)
+
+    def get_word_segments_for_clip(
+        self,
+        transcription: Dict[str, Any],
+        start_time: float,
+        end_time: float
+    ) -> List[Dict[str, Any]]:
+        """
+        Recorta transcription['word_segments'] (timestamps reales por
+        palabra) al rango absoluto [start_time, end_time] de un clip.
+        Llamar solo cuando has_real_word_timing() devolvió True — si no,
+        word_segments no tiene más granularidad que segments y no aporta
+        nada sobre get_segments_with_text().
+
+        Returns:
+            Lista de dicts {id, start, end, text} con timestamps ABSOLUTOS
+            del video (mismo formato que get_segments_with_text), una
+            entrada por PALABRA.
+        """
+        word_segments = transcription.get('word_segments', [])
+        filtered = []
+        for w in word_segments:
+            w_start = w['start']
+            w_end = w['end']
+            if w_end < start_time or w_start > end_time:
+                continue
+            filtered.append({
+                'id': w.get('id', len(filtered)),
+                'start': w_start,
+                'end': w_end,
+                'text': w['text'].strip(),
+            })
+        return filtered
+
     def generate_srt_content(
         self, 
         transcription: Dict[str, Any]

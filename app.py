@@ -358,8 +358,17 @@ class OpusClipPro:
 
             clips_data = []
             total_tokens = 0
+            # Modo Calidad transcribe el video COMPLETO con word_timestamps=True
+            # desde el principio — si eso pasó, hay timing real de palabra
+            # disponible sin necesidad de re-transcribir por clip (eso es lo
+            # que hace clip_word_map, pero solo corre en modo Balance).
+            has_word_timing = self.transcriber.has_real_word_timing(transcription)
             for i, clip in enumerate(viral_clips):
                 word_segs_for_clip = clip_word_map.get(i, [])
+                if not word_segs_for_clip and has_word_timing:
+                    word_segs_for_clip = self.transcriber.get_word_segments_for_clip(
+                        transcription, clip.start, clip.end
+                    )
                 if not word_segs_for_clip:
                     # Fallback: phrase-level segments from fast transcription
                     word_segs_for_clip = self.transcriber.get_segments_with_text(
