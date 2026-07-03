@@ -253,10 +253,19 @@ class VideoEditor:
                 except ValueError:
                     fps = 30
             
+            # MKV/WebM suelen no traer 'duration' en el stream de video — hay que caer al
+            # duration a nivel de contenedor (probe['format']), como ya hace transcriber.py.
+            # Sin este fallback, videos en estos formatos reportaban duración 0, lo que
+            # nunca activaba la transcripción chunked para videos largos y podía dar
+            # tiempos negativos en el fade del branding.
+            duration = video_stream.get('duration')
+            if duration is None:
+                duration = probe.get('format', {}).get('duration', 0)
+
             return {
                 'width': int(video_stream.get('width', 0)),
                 'height': int(video_stream.get('height', 0)),
-                'duration': float(video_stream.get('duration', 0)),
+                'duration': float(duration),
                 'fps': fps,
                 'codec': video_stream.get('codec_name', 'unknown'),
                 'bitrate': int(video_stream.get('bit_rate', 0)),
@@ -432,12 +441,79 @@ class VideoEditor:
             logger.error(f"Error FFmpeg: {e.stderr.decode() if e.stderr else str(e)}")
             raise RuntimeError(f"FFmpeg falló: {e}")
     
+    def _build_hook_clip(
+        self,
+        hook_text: str,
+        style: SubtitleStyle,
+        video_w: int,
+        video_h: int,
+        duration: float = 2.2,
+    ) -> List[Any]:
+        """
+        Overlay del "hook" (frase gancho) quemado en pantalla durante los primeros
+        segundos del clip — el patrón que usan TikTok/CapCut/Opus Clip para maximizar
+        retención en el inicio, que es lo que más pesan los algoritmos de recomendación.
+        Usa el mismo estilo visual elegido para los subtítulos (fuente/color) pero más
+        grande y con fondo, y se fija en el tercio superior para no chocar con los
+        subtítulos normales (que van al centro o abajo).
+        """
+        if not hook_text or not hook_text.strip():
+            return []
+        fade = min(0.25, duration / 4)
+        hook_fontsize = int(style.fontsize * 1.15)
+        clip = TextClip(
+            text=hook_text.strip(),
+            font_size=hook_fontsize,
+            font=style.font,
+            color=style.color,
+            stroke_color=style.stroke_color,
+            stroke_width=style.stroke_width + 1,
+            bg_color="#0000008C",
+            method='caption',
+            size=(int(video_w * 0.88), None),
+            text_align='center',
+            interline=style.line_spacing,
+        )
+        clip = clip.with_position(('center', int(video_h * 0.10)))
+        clip = clip.with_start(0).with_end(min(duration, clip.duration) if clip.duration else duration)
+        clip = clip.with_effects([FadeIn(fade), FadeOut(fade)])
+        return [clip]
+
+    @staticmethod
+    def _parse_bg_color(spec: str) -> Tuple[Tuple[int, int, int], float]:
+        """
+        Convierte un color de fondo — `rgba(r,g,b,a)` CSS, `#RRGGBB` o `#RRGGBBAA` — a un
+        tuple RGB + alfa (0-1) para usar con `ColorClip(...).with_opacity(alpha)`.
+        `ColorClip.color` no acepta NINGÚN string (ni CSS ni hex), solo tuplas RGB — pasarle
+        el string directo (como hacía el estilo "Minimal") crasheaba MoviePy en silencio y
+        el burn caía al fallback ffmpeg, que ignora posición y fondo.
+        """
+        spec = spec.strip()
+        try:
+            if spec.startswith('rgba(') or spec.startswith('rgb('):
+                inner = spec[spec.index('(') + 1: spec.index(')')]
+                parts = [p.strip() for p in inner.split(',')]
+                r, g, b = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
+                a = float(parts[3]) if len(parts) > 3 else 1.0
+                return (r, g, b), max(0.0, min(1.0, a))
+            if spec.startswith('#'):
+                hex_val = spec.lstrip('#')
+                if len(hex_val) >= 6:
+                    r, g, b = int(hex_val[0:2], 16), int(hex_val[2:4], 16), int(hex_val[4:6], 16)
+                    a = int(hex_val[6:8], 16) / 255.0 if len(hex_val) >= 8 else 1.0
+                    return (r, g, b), a
+        except (ValueError, IndexError):
+            pass
+        return (0, 0, 0), 0.6  # fallback: negro semi-transparente
+
     def burn_subtitles_moviepy(
         self,
         video_path: str,
         output_path: str,
         segments: List[Dict[str, Any]],
-        style: Optional[SubtitleStyle] = None
+        style: Optional[SubtitleStyle] = None,
+        hook_text: Optional[str] = None,
+        hook_duration: float = 2.2,
     ) -> str:
         """
         Quema subtítulos en el video usando MoviePy (calidad superior).
@@ -504,16 +580,19 @@ class VideoEditor:
                 
                 # Fondo opcional
                 if style.bg_color:
+                    rgb, alpha = self._parse_bg_color(style.bg_color)
                     bg = ColorClip(
                         size=(txt_clip.w + 40, txt_clip.h + 20),
-                        color=style.bg_color
-                    ).with_start(start).with_end(end).with_position(
+                        color=rgb
+                    ).with_opacity(alpha).with_start(start).with_end(end).with_position(
                         lambda t: txt_clip.pos(t) if callable(txt_clip.pos) else txt_clip.pos
                     )
                     subtitle_clips.append(bg)
-                
+
                 subtitle_clips.append(txt_clip)
-            
+
+            subtitle_clips.extend(self._build_hook_clip(hook_text, style, video.w, video.h, hook_duration))
+
             # Componer video final
             final_video = CompositeVideoClip([video] + subtitle_clips, size=video.size)
 
@@ -576,7 +655,9 @@ class VideoEditor:
         output_path: str,
         word_segments: List[Dict[str, Any]],
         style: Optional[SubtitleStyle] = None,
-        animation_mode: str = "karaoke"
+        animation_mode: str = "karaoke",
+        hook_text: Optional[str] = None,
+        hook_duration: float = 2.2,
     ) -> str:
         """
         Quema subtítulos estilo karaoke (palabra por palabra) con efecto de highlight.
@@ -701,7 +782,9 @@ class VideoEditor:
                     word_highlight = word_highlight.with_effects([FadeIn(fade_duration), FadeOut(fade_duration)])
                     
                     subtitle_clips.append(word_highlight)
-            
+
+            subtitle_clips.extend(self._build_hook_clip(hook_text, style, video.w, video.h, hook_duration))
+
             # Componer video
             final_video = CompositeVideoClip([video] + subtitle_clips, size=video.size)
 
@@ -796,19 +879,31 @@ class VideoEditor:
         else:
             fc = 'white'
 
-        # Build drawtext filter chain
+        # Build drawtext filter chain. Cada segmento se escribe a un .txt temporal y se
+        # referencia con `textfile=` en vez de inyectar el texto inline con `text='...'`
+        # — el escapado de apóstrofes con `\'` dentro de comillas simples NO funciona en
+        # el parser de filtros de ffmpeg (ni el truco estándar de shell cerrar/escapar/
+        # reabrir comillas): en el mejor caso el apóstrofe desaparece en silencio, en el
+        # peor el texto entero no se dibuja. `textfile` lee el contenido tal cual, sin
+        # ninguna de esas reglas de escapado — solo la RUTA del archivo necesita escapar
+        # los ':' (por la unidad de Windows), igual que ya se hace con `font_path`.
         filters = []
-        for seg in segments:
+        temp_files: List[Path] = []
+        temp_dir = config.config.TEMP_DIR / "drawtext_fallback"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        for idx, seg in enumerate(segments):
             text = seg.get('text', '').strip()
             if not text:
                 continue
-            # Escape special chars for ffmpeg
-            text_esc = text.replace("'", "\\'").replace(':', '\\:').replace('%', '\\%')
+            txt_file = temp_dir / f"seg_{os.getpid()}_{idx}.txt"
+            txt_file.write_text(text, encoding='utf-8')
+            temp_files.append(txt_file)
+            txt_path_escaped = str(txt_file).replace('\\', '/').replace(':', '\\:')
             t_start = seg['start']
             t_end = seg['end']
             border = style.stroke_width
             filters.append(
-                f"drawtext=fontfile='{font_path_escaped}':text='{text_esc}'"
+                f"drawtext=fontfile='{font_path_escaped}':textfile='{txt_path_escaped}'"
                 f":fontsize={fontsize}:fontcolor={fc}"
                 f":borderw={border}:bordercolor=black"
                 f":x=(w-text_w)/2:y=(h-text_h)/2"
@@ -841,6 +936,12 @@ class VideoEditor:
             logger.error(f"ffmpeg drawtext excepción: {e}")
             import shutil
             shutil.copy2(video_path, output_path)
+        finally:
+            for f in temp_files:
+                try:
+                    f.unlink(missing_ok=True)
+                except Exception as _ce:
+                    logger.debug(f"No se pudo borrar temp de drawtext: {_ce}")
         return output_path
 
     def create_preview_segment(
@@ -887,35 +988,38 @@ class VideoEditor:
             y_off = (orig_h - crop_h) // 2
         
         try:
+            # ¿Tiene pista de audio la fuente? (algunos screen recordings no la tienen) —
+            # mapear `input_stream.audio` incondicionalmente hace fallar el comando entero
+            # cuando no hay audio, el mismo bug que ya se arregló en crop_to_vertical_ffmpeg.
+            probe = ffmpeg.probe(str(input_path))
+            has_audio = any(s['codec_type'] == 'audio' for s in probe.get('streams', []))
+
             # Preview rápido: 480x854, 24fps, bitrate bajo
             # Input de video y audio por separado para mapear correctamente
             input_stream = ffmpeg.input(str(input_path), ss=start_time, t=duration)
-            
+
             # Procesar solo el video
             video_stream = ffmpeg.filter(
                 input_stream.video, 'crop', w=crop_w, h=crop_h, x=x_off, y=y_off
             )
             video_stream = ffmpeg.filter(video_stream, 'scale', w=480, h=854)
-            
-            # Tomar el audio sin procesar
-            audio_stream = input_stream.audio
-            
-            # Output con video y audio mapeados
-            stream = ffmpeg.output(
-                video_stream,
-                audio_stream,
-                str(output_path),
+
+            output_kwargs = dict(
                 vcodec='libx264',
-                acodec='aac',
                 video_bitrate='1500k',
-                audio_bitrate='128k',
                 r=24,
                 preset='ultrafast',
                 pix_fmt='yuv420p',
                 movflags='faststart',
                 shortest=None  # Termina cuando el stream más corto termina
             )
-            
+            if has_audio:
+                output_kwargs['acodec'] = 'aac'
+                output_kwargs['audio_bitrate'] = '128k'
+                stream = ffmpeg.output(video_stream, input_stream.audio, str(output_path), **output_kwargs)
+            else:
+                stream = ffmpeg.output(video_stream, str(output_path), **output_kwargs)
+
             ffmpeg.run(stream, overwrite_output=True, quiet=True)
             logger.info(f"Preview creado: {output_path} ({duration:.1f}s)")
             return str(output_path)
@@ -1002,20 +1106,21 @@ class VideoEditor:
             input_video: Ruta al video
             output_path: Ruta de salida de la imagen
             timestamp: Segundo para capturar (default: inicio)
-            width: Ancho de la imagen (mantiene aspecto 9:16)
-            
+            width: Ancho de la imagen (mantiene el aspecto real del video de entrada)
+
         Returns:
             Ruta de la imagen generada
         """
         input_path = Path(input_video)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        height = int(width * 16 / 9)  # 9:16 aspect ratio
-        
+
         try:
             stream = ffmpeg.input(str(input_path), ss=timestamp)
-            stream = ffmpeg.filter(stream, 'scale', w=width, h=height)
+            # -1 deja que ffmpeg calcule el alto manteniendo el aspecto real del video —
+            # antes se forzaba 9:16 siempre, deformando los thumbnails de exports
+            # landscape (16:9) o cuadrados (1:1).
+            stream = ffmpeg.filter(stream, 'scale', w=width, h=-1)
             stream = ffmpeg.output(stream, str(output_path), vframes=1, format='image2')
             
             ffmpeg.run(stream, overwrite_output=True, quiet=True)
@@ -1058,18 +1163,39 @@ class VideoEditor:
             return []
 
         if output_dir is None:
-            output_dir = config.TEMP_DIR / "keyframes"
+            # `config` acá es el MÓDULO config.py, no la instancia AppConfig (esa vive en
+            # `config.config`) — `config.TEMP_DIR` no existe y tiraba AttributeError en
+            # cada llamada sin output_dir explícito, lo que caía siempre en el except de
+            # analyze_video() y dejaba `frames=[]` — el análisis multimodal (con frames)
+            # nunca se ejecutó de verdad, siempre caía al camino de solo-texto en silencio.
+            output_dir = config.config.TEMP_DIR / "keyframes"
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Calcular el recorte 9:16 en la resolución ORIGINAL antes de escalar. El orden
+        # inverso (escalar al ancho final y DESPUÉS recortar 9:16) rompía siempre con
+        # fuentes landscape (16:9): al escalar 1280x720 a ancho=720 el alto resultante
+        # queda en ~405px, y luego pedirle un crop de 1280px de alto es imposible
+        # ("Invalid too big... size for height") — ffmpeg fallaba en TODOS los frames.
+        info = self.get_video_info(str(input_path))
+        orig_w, orig_h = info.get('width', 0), info.get('height', 0)
+        if orig_w and orig_h:
+            if orig_w / orig_h > 9 / 16:
+                crop_w, crop_h = int(orig_h * 9 / 16), orig_h
+            else:
+                crop_w, crop_h = orig_w, int(orig_w * 16 / 9)
+            crop_x, crop_y = (orig_w - crop_w) // 2, (orig_h - crop_h) // 2
+            vf = f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={width}:-1'
+        else:
+            vf = f'scale={width}:-1'
 
         images = []
         for i, ts in enumerate(timestamps):
             out_path = output_dir / f"frame_{i:03d}_{ts:.1f}s.jpg"
             try:
-                # Extraer frame con ffmpeg, crop 9:16 desde centro
                 cmd = [
                     'ffmpeg', '-y', '-ss', str(ts), '-i', str(input_path),
-                    '-vf', f'scale={width}:-1:force_original_aspect_ratio=decrease,crop={width}:{int(width*16/9)}',
+                    '-vf', vf,
                     '-frames:v', '1', '-q:v', '2', str(out_path)
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -1102,6 +1228,9 @@ class VideoEditor:
         compress_pauses: bool = False,
         max_pause_gap: float = 1.2,
         target_pause_gap: float = 0.35,
+        hook_text: Optional[str] = None,
+        show_hook: bool = True,
+        hook_duration: float = 2.2,
     ) -> str:
         """
         Pipeline completo: crop a 9:16 + subtítulos.
@@ -1114,6 +1243,9 @@ class VideoEditor:
             segments: Segmentos Whisper (solo los del clip)
             add_subtitles: Si quemar subtítulos
             track_faces: Activar seguimiento facial AI
+            hook_text: Frase gancho (de Gemini) a mostrar como overlay al inicio del clip
+            show_hook: Si mostrar el overlay del hook (requiere add_subtitles=True)
+            hook_duration: Cuántos segundos se muestra el hook en pantalla
             subtitle_mode: "static", "karaoke", "highlight" o "pop"
             style: Estilo de subtítulos a aplicar (opcional, usa self.subtitle_style si no se pasa)
             compress_pauses: Si comprimir pausas/silencios largos entre frases (F4)
@@ -1205,14 +1337,18 @@ class VideoEditor:
                     str(output_path),
                     word_segments,
                     style=style,
-                    animation_mode=subtitle_mode
+                    animation_mode=subtitle_mode,
+                    hook_text=hook_text if show_hook else None,
+                    hook_duration=hook_duration,
                 )
             else:
                 self.burn_subtitles_moviepy(
                     str(temp_crop),
                     str(output_path),
                     adjusted_segments,
-                    style=style
+                    style=style,
+                    hook_text=hook_text if show_hook else None,
+                    hook_duration=hook_duration,
                 )
             
             # Limpiar temp
@@ -1378,23 +1514,28 @@ class VideoEditor:
             info = self.get_video_info(input_path)
             fps = info.get('fps', 30)
             w, h = info.get('width', 1080), info.get('height', 1920)
-            # Build zoompan expression: zoom=1+factor during cue windows
             zoom_frames_per_cue = int(zoom_duration_s * fps)
-            conditions = []
-            for cue in zoom_cues:
+
+            # Encadenar TODOS los cues en una sola expresión if/else anidada — antes se
+            # armaba una expresión con todos los cues (`zoom_expr`) y se la descartaba sin
+            # usar, aplicando en la práctica el zoom SOLO en el primer cue de la lista.
+            # Además usaba la variable `n`, que zoompan no reconoce en absoluto (solo
+            # entiende `on`/`in` para el número de frame) — ffmpeg fallaba SIEMPRE con
+            # "Undefined constant" y el filtro completo caía al fallback silencioso que
+            # copia el video sin tocar, así que el zoom dinámico nunca se aplicó ni una vez.
+            z_expr = "1"
+            for cue in reversed(zoom_cues):
                 start_f = int(cue['time'] * fps)
                 end_f = start_f + zoom_frames_per_cue
                 intensity = cue.get('intensity', 0.5)
-                z = 1.0 + zoom_factor * intensity * 0.1
-                conditions.append(f"between(n,{start_f},{end_f})*{z:.4f}")
-            # Fallback to 1 when no cue
-            zoom_expr = "+".join(conditions) + "+(" + "+".join(
-                [f"1*not(between(n,{int(c['time']*fps)},{int(c['time']*fps)+zoom_frames_per_cue}))" for c in zoom_cues]
-            ) + ")"
-            # Simpler approach: use select + scale + overlay is complex; use zoompan directly
+                z_val = 1.0 + zoom_factor * intensity * 0.1
+                z_expr = f"if(between(on,{start_f},{end_f}),{z_val:.4f},{z_expr})"
+
+            # x/y centran el recorte del zoom — sin especificarlos, zoompan ancla en la
+            # esquina superior-izquierda por defecto, así que el "punch-in" se sentía
+            # como un desplazamiento hacia esa esquina en vez de un zoom al centro.
             vf = (
-                f"zoompan=z='if(between(n,{int(zoom_cues[0]['time']*fps)},"
-                f"{int(zoom_cues[0]['time']*fps)+zoom_frames_per_cue}),{1.0+zoom_factor*zoom_cues[0].get('intensity',0.5)*0.1:.4f},1)'"
+                f"zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                 f":d=1:s={w}x{h}:fps={fps}"
             )
             (

@@ -95,10 +95,14 @@ PREDEFINED_STYLES = {
 class SubtitleEditor:
     """Editor de subtítulos con correcciones automáticas y manuales."""
     
-    # Filler words comunes en español e inglés
+    # Filler words comunes en español e inglés.
+    # NOTA: "como" se sacó de esta lista — es una palabra legítima carísima de uso
+    # normal ("una casa como esa"), no una muletilla, y se borraba siempre que
+    # aparecía como palabra suelta (aunque el chequeo ya usa \b, el problema no era
+    # el regex sino que la palabra en sí es demasiado común para tratarla como filler).
     FILLER_WORDS = [
         # Español
-        'eh', 'um', 'ah', 'oh', 'pues', 'bueno', 'sabes', 'como', 'o sea',
+        'eh', 'um', 'ah', 'oh', 'pues', 'bueno', 'sabes', 'o sea',
         'entonces', 'vale', 'ya sabes', 'digamos', 'tipo', 'asi que',
         # Inglés
         'uh', 'um', 'uhm', 'like', 'you know', 'i mean', 'so', 'well',
@@ -510,10 +514,12 @@ class SubtitleEditor:
             original = entry.display_text
             text_lower = original.lower()
             
-            # Encontrar emojis relevantes
+            # Encontrar emojis relevantes — con \b (palabra completa), no substring.
+            # Antes `if keyword in text_lower` matcheaba "no" (❌) dentro de "noche",
+            # "nosotros", "notable", etc., o "1" dentro de cualquier año/hora/número.
             emojis_to_add = []
             for keyword, emoji in self.EMOJI_MAP.items():
-                if keyword in text_lower and emoji not in emojis_to_add:
+                if re.search(rf'\b{re.escape(keyword)}\b', text_lower) and emoji not in emojis_to_add:
                     emojis_to_add.append(emoji)
                     if len(emojis_to_add) >= max_emojis_per_entry:
                         break

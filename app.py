@@ -16,7 +16,7 @@ import gradio as gr
 from config import config, SUPPORTED_VIDEO_FORMATS, ERRORS, SUCCESS, SUBTITLE_STYLES
 from transcriber import Transcriber
 from llm_analyzer import GeminiAnalyzer, ViralClip
-from video_editor import VideoEditor, FACE_TRACKING_AVAILABLE, SubtitleStyle
+from video_editor import VideoEditor, FACE_TRACKING_AVAILABLE, SubtitleStyle, compute_keep_ranges, remap_to_compressed
 from state_manager import StateManager, ProjectState, ClipState
 from subtitle_editor import SubtitleEditor, create_editor_from_transcription, PREDEFINED_STYLES
 from audio_analyzer import AudioAnalyzer
@@ -46,14 +46,25 @@ class OpusClipPro:
         
     def _init_components(self, model_size: Optional[str] = None):
         """Inicializa componentes lazy-loading."""
+        # Recrear el Transcriber si el llamador pidió explícitamente un modelo Whisper
+        # distinto al ya cargado — antes se creaba una sola vez y quedaba fijo para
+        # siempre, así que cambiar el dropdown o usar los presets (Rápido/Calidad) no
+        # tenía ningún efecto real. Si no se pide un modelo específico (model_size=None,
+        # como en generate_preview) se respeta el que ya esté cargado, sin recargar.
+        if model_size is not None and self.transcriber is not None and self.transcriber.model_size != model_size:
+            logger.info(f"Cambiando modelo Whisper de '{self.transcriber.model_size}' a '{model_size}'")
+            self.transcriber.unload_model()
+            self.transcriber = None
+
         if self.transcriber is None:
-            logger.info("Inicializando Whisper...")
+            desired_model = model_size or config.WHISPER_MODEL
+            logger.info(f"Inicializando Whisper '{desired_model}'...")
             self.transcriber = Transcriber(
-                model_size=model_size or config.WHISPER_MODEL,
+                model_size=desired_model,
                 language=config.WHISPER_LANGUAGE
             )
             self.transcriber.load_model()
-            
+
         if self.analyzer is None:
             logger.info("Inicializando Gemini...")
             self.analyzer = GeminiAnalyzer(
@@ -161,6 +172,7 @@ class OpusClipPro:
                     video_path,
                     progress_callback=_prog_transcribe,
                     word_timestamps=False if fast_pass else None,
+                    cache_key_suffix="_fast" if fast_pass else "",
                 )
             else:
                 transcription = self.transcriber.transcribe(
@@ -227,10 +239,15 @@ class OpusClipPro:
             # Extract keyframes for visual analysis
             progress(0.41, desc="🎬 Extrayendo frames clave...")
             frames = []
+            frame_timestamps: List[float] = []
             try:
                 if self.editor and duration > 0:
-                    # Extract more frames (every 3 seconds, up to 15 frames)
-                    frame_timestamps = [min(i * 3, duration - 1) for i in range(int(duration / 3) + 1)][:15]
+                    # Frames distribuidos uniformemente en TODA la duración — antes se
+                    # tomaban cada 3s desde el inicio con tope de 15, lo que en videos
+                    # de más de 45s dejaba a Gemini "ciego" para el resto del video.
+                    num_frames = 15
+                    step = duration / num_frames
+                    frame_timestamps = [min(i * step, max(0.0, duration - 0.5)) for i in range(num_frames)]
                     frames = self.editor.extract_keyframes(
                         video_path,
                         timestamps=frame_timestamps,
@@ -241,6 +258,7 @@ class OpusClipPro:
                 logger.warning(f"No se pudieron extraer frames: {e}")
                 gr.Warning(f"⚠️ No se pudieron extraer frames clave, análisis solo con transcripción: {e}")
                 frames = []
+                frame_timestamps = []
 
             # Gemini analysis with all data
             if frames:
@@ -252,6 +270,7 @@ class OpusClipPro:
                     clip_duration_range=(min_duration, max_duration),
                     progress_callback=lambda p, m: progress(0.43 + p * 0.32, desc=m),
                     custom_prompt=custom_prompt,
+                    frame_timestamps=frame_timestamps,
                 )
             else:
                 progress(0.43, desc="🧠 Analizando con Gemini (datos enriquecidos)...")
@@ -277,9 +296,15 @@ class OpusClipPro:
             # Snap boundaries to silence AND scene changes for more natural cuts
             def snap_to_nearest(val, candidates, max_dist=2.0):
                 """Snap value to nearest candidate within max_dist."""
+                # `best_dist` arranca en max_dist (no en 0) — antes arrancaba comparando
+                # contra la distancia de `val` a sí mismo (siempre 0), así que ningún
+                # candidato podía ganar nunca y la función era un no-op silencioso.
                 best = val
+                best_dist = max_dist
                 for c in candidates:
-                    if abs(c - val) < abs(best - val) and abs(c - val) <= max_dist:
+                    dist = abs(c - val)
+                    if dist < best_dist:
+                        best_dist = dist
                         best = c
                 return best
 
@@ -430,18 +455,33 @@ class OpusClipPro:
                     video_path, num_clips, min_duration, max_duration, model_size,
                     _batch_progress, custom_prompt, analysis_mode
                 )
-                n_clips = len(self.current_state.clips) if self.current_state else 0
-                results.append(f"✅ {video_name}: {n_clips} clips")
+                # analyze_video() atrapa sus propias excepciones y devuelve una tupla de
+                # error (no las relanza), así que el except de acá abajo casi nunca
+                # disparaba — un video fallido se reportaba igual como "✅" con el conteo
+                # de clips del proyecto ANTERIOR. Hay que leer el status devuelto.
+                status_msg = last_result[0] if last_result else ""
+                if status_msg.startswith("❌") or status_msg.startswith("⚠️"):
+                    logger.error(f"'{video_name}' falló en el lote: {status_msg}")
+                    gr.Warning(f"❌ Falló '{video_name}' en el lote: {status_msg}")
+                    results.append(f"❌ {video_name}: {status_msg}")
+                else:
+                    n_clips = len(self.current_state.clips) if self.current_state else 0
+                    results.append(f"✅ {video_name}: {n_clips} clips")
             except Exception as e:
                 logger.error(f"Error procesando '{video_name}' en el lote: {e}", exc_info=True)
                 gr.Warning(f"❌ Falló '{video_name}' en el lote: {e}")
                 results.append(f"❌ {video_name}: {e}")
 
-        progress(1.0, desc=f"✅ Lote completo: {total} videos procesados")
+        success_count = sum(1 for r in results if r.startswith("✅"))
         summary = "\n".join(results)
-        status = f"🎉 Lote completo ({total} videos):\n{summary}"
+        if success_count > 0:
+            progress(1.0, desc=f"✅ Lote completo: {success_count}/{total} videos exitosos")
+            status = f"🎉 Lote completo ({success_count}/{total} exitosos):\n{summary}"
+        else:
+            progress(1.0, desc=f"❌ Lote falló: 0/{total} videos exitosos")
+            status = f"❌ Lote falló (0/{total} exitosos):\n{summary}"
 
-        if last_result and self.current_state:
+        if success_count > 0 and last_result and self.current_state:
             _, clips_sum, analysis_sum, timeline_vis, clip_dropdown, tokens = last_result
             return status, clips_sum, analysis_sum, timeline_vis, clip_dropdown, tokens
         return status, "", "", gr.update(visible=False), gr.update(choices=[]), "0 tokens"
@@ -449,7 +489,7 @@ class OpusClipPro:
     def _score_color(self, score: float) -> str:
         """Returns color based on score 0-10."""
         if score >= 8.5:
-            return "#00f2ea"  # cyan - excellent
+            return "#7C5CFF"  # cyan - excellent
         elif score >= 7.0:
             return "#4ecdc4"  # teal - good
         elif score >= 5.0:
@@ -504,11 +544,12 @@ class OpusClipPro:
                         <span style="font-size: 1.1em;">{rank_badge}</span>
                         <h4 style="margin: 0; color: #fff; font-size: 1em;">Clip {i} {status_icon}</h4>
                     </div>
-                    <div style="text-align: center; background: {score_color}22; border: 2px solid {score_color}; 
-                                border-radius: 50%; width: 52px; height: 52px; display: flex; 
-                                flex-direction: column; align-items: center; justify-content: center;">
-                        <span style="color: {score_color}; font-weight: 900; font-size: 1.1em; line-height: 1;">{clip.virality_score:.1f}</span>
-                        <span style="color: {score_color}88; font-size: 0.6em; line-height: 1;">/ 10</span>
+                    <div style="text-align: center; background: {score_color}22; border: 3px solid {score_color};
+                                border-radius: 50%; width: 72px; height: 72px; display: flex;
+                                flex-direction: column; align-items: center; justify-content: center;
+                                box-shadow: 0 0 16px {score_color}55;">
+                        <span style="color: {score_color}; font-weight: 900; font-size: 1.6em; line-height: 1;">{clip.virality_score:.1f}</span>
+                        <span style="color: {score_color}aa; font-size: 0.58em; line-height: 1.4; letter-spacing: 0.04em; text-transform: uppercase;">Virality</span>
                     </div>
                 </div>
                 <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;">
@@ -653,6 +694,15 @@ class OpusClipPro:
         self.subtitle_editors = {}
         for clip_state in self.current_state.clips:
             editor = create_editor_from_transcription(clip_state.segments, style_name="modern")
+            # Re-aplicar las ediciones de subtítulos guardadas — sin esto, el editor se
+            # reconstruía solo desde los segments originales y las ediciones del usuario
+            # (guardadas en clip_state.subtitle_edits) desaparecían en silencio al recargar
+            # un proyecto. Las claves llegan como str tras el round-trip por JSON.
+            for seg_id, edited_text in (clip_state.subtitle_edits or {}).items():
+                try:
+                    editor.edit_entry(int(seg_id), edited_text)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"No se pudo re-aplicar edición de subtítulo {seg_id}: {e}")
             self.subtitle_editors[clip_state.id] = editor
         clips_summary = self._build_clips_summary()
         analysis_summary = self._build_analysis_summary(self.current_state.clips, self.current_state.total_duration, len(self.current_state.transcription.get('segments', [])))
@@ -669,7 +719,14 @@ class OpusClipPro:
         success = self.state_manager.update_clip(clip_id, start=new_start, end=new_end)
         if success:
             self.current_state = self.state_manager.current_state
-            return f"✅ Clip {clip_id + 1} actualizado: {new_start:.1f}s - {new_end:.1f}s"
+            # Reportar los valores REALES guardados, no los que tipeó el usuario —
+            # state_manager.update_clip() ajusta en silencio si start >= end o si se
+            # pasan del límite del video, y el mensaje confirmaba los valores tipeados
+            # aunque no fueran los que terminaron guardados.
+            clip = next((c for c in self.current_state.clips if c.id == clip_id), None)
+            if clip:
+                return f"✅ Clip {clip_id + 1} actualizado: {clip.start:.1f}s - {clip.end:.1f}s"
+            return f"✅ Clip {clip_id + 1} actualizado"
         return "❌ Error"
     
     def toggle_clip_selection(self, clip_id: int) -> Tuple[str, str, str, str]:
@@ -762,8 +819,41 @@ class OpusClipPro:
         data = editor.get_entries_for_dataframe()
         if not data:
             return [["—", "—", "—", "No hay subtítulos", "—", "—"]]
-        return [[e['ID'], e['Start'], e['End'], e['Original Text'], e['Edited Text'], e['Edited']] for e in data]
-    
+        return [[e['ID'], e['Inicio'], e['Fin'], e['Texto Original'], e['Texto Editado'], e['Editado']] for e in data]
+
+    def update_subtitles_from_dataframe(self, clip_id: int, df_data: List[List[Any]]) -> Tuple[str, List[List[Any]]]:
+        """
+        Aplica ediciones hechas directamente en la grilla de subtítulos — antes la tabla
+        tenía `interactive=True` pero ningún evento leía sus cambios; solo el flujo
+        separado "Fila ID + Nuevo Texto + Guardar" funcionaba, así que editar la celda
+        obvia (columna "Editado") se perdía en silencio.
+        """
+        if clip_id not in self.subtitle_editors or not df_data:
+            return "❌ Editor no encontrado", self.get_subtitle_data(clip_id)
+        editor = self.subtitle_editors[clip_id]
+        updated = 0
+        for row in df_data:
+            if not row or len(row) < 5:
+                continue
+            try:
+                row_id = int(row[0])
+            except (ValueError, TypeError):
+                continue
+            new_text = row[4]
+            if new_text is None:
+                continue
+            new_text = str(new_text).strip()
+            if not new_text:
+                continue
+            entry = next((e for e in editor.entries if e.id == row_id), None)
+            if entry and new_text != entry.display_text:
+                if editor.edit_entry(row_id, new_text):
+                    self.state_manager.update_subtitle_edit(clip_id, row_id, new_text)
+                    updated += 1
+        if updated:
+            self._save_all_subtitle_edits()
+        return f"✅ {updated} subtítulo(s) actualizado(s) desde la tabla", self.get_subtitle_data(clip_id)
+
     def _save_all_subtitle_edits(self) -> None:
         if not self.current_state:
             return
@@ -846,9 +936,10 @@ class OpusClipPro:
         enable_mood_grade: bool = True,
         enable_ducking: bool = True,
         brand_name: str = "",
-        brand_color: str = "#00f2ea",
+        brand_color: str = "#7C5CFF",
         enable_zoom_cues: bool = False,
         compress_pauses: bool = False,
+        show_hook: bool = True,
     ) -> Tuple[int, str, bool]:
         """
         Exporta un solo clip con post-procesamiento opcional:
@@ -879,7 +970,9 @@ class OpusClipPro:
                 subtitle_mode=subtitle_mode,
                 target_width=target_width, target_height=target_height,
                 style=self._subtitle_style_from_name(style_name),
-                compress_pauses=compress_pauses
+                compress_pauses=compress_pauses,
+                hook_text=clip_state.hook,
+                show_hook=show_hook,
             )
             current = base_out
 
@@ -943,7 +1036,34 @@ class OpusClipPro:
             logger.error(f"Error exportando clip {i}: {e}")
             return (i, str(e), False)
     
-    def _generate_srt(self, clip_state, index: int) -> Optional[str]:
+    def _relative_segments(self, clip_state, segments: List[Dict[str, Any]], compress_pauses: bool = False) -> List[Dict[str, Any]]:
+        """
+        Convierte segmentos (timestamps absolutos del video) a relativos al inicio del clip,
+        y si F4 (compress_pauses) estuvo activo en el export, remapea con el MISMO cálculo de
+        `compute_keep_ranges`/`remap_to_compressed` que usó `create_viral_clip` para comprimir
+        el video — si no, los .srt/.vtt quedan corridos respecto al video real porque el video
+        se acortó pero los sidecars seguían con los timestamps sin comprimir.
+        """
+        offset = clip_state.start
+        relative = []
+        for seg in segments:
+            start_s = max(0.0, seg.get('start', 0.0) - offset)
+            end_s = max(start_s + 0.1, seg.get('end', seg.get('start', 0.0) + 1.0) - offset)
+            relative.append({'start': start_s, 'end': end_s, 'text': seg.get('text', '')})
+
+        if compress_pauses:
+            try:
+                keep_ranges = compute_keep_ranges(relative, clip_state.duration)
+                if len(keep_ranges) > 1:
+                    for seg in relative:
+                        seg['start'] = remap_to_compressed(seg['start'], keep_ranges)
+                        seg['end'] = remap_to_compressed(seg['end'], keep_ranges)
+            except Exception as e:
+                logger.warning(f"No se pudo remapear subtítulos comprimidos (F4): {e}")
+
+        return relative
+
+    def _generate_srt(self, clip_state, index: int, compress_pauses: bool = False) -> Optional[str]:
         """Genera un archivo SRT para un clip dado (timestamps relativos al inicio del clip)."""
         try:
             editor = self.subtitle_editors.get(clip_state.id)
@@ -951,13 +1071,12 @@ class OpusClipPro:
             if not segments:
                 return None
             srt_path = config.OUTPUT_DIR / f"viral_clip_{index+1:02d}_{clip_state.virality_score:.1f}.srt"
-            offset = clip_state.start
+            relative = self._relative_segments(clip_state, segments, compress_pauses)
             lines = []
             entry_num = 0
-            for seg in segments:
-                start_s = max(0.0, seg.get('start', 0.0) - offset)
-                end_s = max(start_s + 0.1, seg.get('end', seg.get('start', 0.0) + 1.0) - offset)
-                text = seg.get('text', '').strip()
+            for seg in relative:
+                start_s, end_s = seg['start'], seg['end']
+                text = seg['text'].strip()
                 if not text:
                     continue
                 entry_num += 1
@@ -972,7 +1091,7 @@ class OpusClipPro:
             gr.Warning(f"⚠️ No se pudo generar el SRT del clip {index+1}: {e}")
             return None
 
-    def _generate_vtt(self, clip_state, index: int) -> Optional[str]:
+    def _generate_vtt(self, clip_state, index: int, compress_pauses: bool = False) -> Optional[str]:
         """Genera un archivo VTT para un clip dado (timestamps relativos al inicio del clip)."""
         try:
             editor = self.subtitle_editors.get(clip_state.id)
@@ -980,12 +1099,11 @@ class OpusClipPro:
             if not segments:
                 return None
             vtt_path = config.OUTPUT_DIR / f"viral_clip_{index+1:02d}_{clip_state.virality_score:.1f}.vtt"
-            offset = clip_state.start
+            relative = self._relative_segments(clip_state, segments, compress_pauses)
             lines = ["WEBVTT\n"]
-            for seg in segments:
-                start_s = max(0.0, seg.get('start', 0.0) - offset)
-                end_s = max(start_s + 0.1, seg.get('end', seg.get('start', 0.0) + 1.0) - offset)
-                text = seg.get('text', '').strip()
+            for seg in relative:
+                start_s, end_s = seg['start'], seg['end']
+                text = seg['text'].strip()
                 if not text:
                     continue
                 def _fmt(s):
@@ -1098,11 +1216,12 @@ class OpusClipPro:
         export_srt: bool = True,
         export_vtt: bool = True,
         brand_name: str = "",
-        brand_color: str = "#00f2ea",
+        brand_color: str = "#7C5CFF",
         enable_mood_grade: bool = True,
         enable_ducking: bool = True,
         enable_zoom_cues: bool = False,
         compress_pauses: bool = False,
+        show_hook: bool = True,
     ) -> Tuple[str, List, List[str], str]:
         """
         Exporta clips seleccionados, soporta procesamiento paralelo.
@@ -1159,6 +1278,7 @@ class OpusClipPro:
                             brand_color,
                             enable_zoom_cues,
                             compress_pauses,
+                            show_hook,
                         )
                         future_to_index[future] = i
                     
@@ -1188,6 +1308,7 @@ class OpusClipPro:
                         enable_mood_grade, enable_ducking,
                         brand_name, brand_color,
                         enable_zoom_cues, compress_pauses,
+                        show_hook,
                     )
                     if success:
                         output_files[idx] = result
@@ -1220,12 +1341,12 @@ class OpusClipPro:
                     
                     # Generar SRT si se solicitó
                     if export_srt:
-                        srt_file = self._generate_srt(clip, i)
+                        srt_file = self._generate_srt(clip, i, compress_pauses=compress_pauses)
                         if srt_file:
                             all_outputs.append(srt_file)
                             logger.info(f"SRT generado: {srt_file}")
                     if export_vtt:
-                        vtt_file = self._generate_vtt(clip, i)
+                        vtt_file = self._generate_vtt(clip, i, compress_pauses=compress_pauses)
                         if vtt_file:
                             all_outputs.append(vtt_file)
                             logger.info(f"VTT generado: {vtt_file}")
@@ -1277,7 +1398,7 @@ class OpusClipPro:
             
             /* Primary (Cyan) */
             --primary: #cffffb;
-            --primary-container: #00f2ea;
+            --primary-container: #7C5CFF;
             --primary-fixed: #29fcf3;
             --primary-fixed-dim: #00ddd6;
             --on-primary: #003735;
@@ -1301,7 +1422,7 @@ class OpusClipPro:
             --tertiary-fixed: #efdbff;
             --tertiary-fixed-dim: #dcb8ff;
             --on-tertiary: #480081;
-            --on-tertiary-container: #8523dd;
+            --on-tertiary-container: #5B3FD9;
             --on-tertiary-fixed: #2c0051;
             --on-tertiary-fixed-variant: #6700b5;
             
@@ -1330,8 +1451,8 @@ class OpusClipPro:
             --glass-border-light: rgba(255, 255, 255, 0.15);
             --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.4);
             --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.3);
-            --glow-cyan: 0 0 20px rgba(0, 242, 234, 0.3);
-            --glow-purple: 0 0 20px rgba(133, 35, 221, 0.3);
+            --glow-cyan: 0 0 20px rgba(124, 92, 255, 0.3);
+            --glow-purple: 0 0 20px rgba(91, 63, 217, 0.3);
         }
         
         /* Base */
@@ -1403,7 +1524,7 @@ class OpusClipPro:
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 0 15px rgba(0, 242, 234, 0.3);
+            box-shadow: 0 0 15px rgba(124, 92, 255, 0.3);
         }
         
         .stitch-logo-icon span {
@@ -1449,10 +1570,10 @@ class OpusClipPro:
         }
         
         .stitch-nav-item.active {
-            background: linear-gradient(90deg, rgba(0, 242, 234, 0.1), transparent);
+            background: linear-gradient(90deg, rgba(124, 92, 255, 0.1), transparent);
             color: var(--primary-container);
             border-right: 2px solid var(--primary-container);
-            box-shadow: 0 0 15px rgba(0, 242, 234, 0.1);
+            box-shadow: 0 0 15px rgba(124, 92, 255, 0.1);
         }
         
         .stitch-nav-footer {
@@ -1494,7 +1615,7 @@ class OpusClipPro:
             font-size: 20px;
             font-weight: 800;
             letter-spacing: -0.02em;
-            background: linear-gradient(90deg, #00f2ea, #8523dd);
+            background: linear-gradient(90deg, #7C5CFF, #5B3FD9);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -1615,14 +1736,14 @@ class OpusClipPro:
         
         /* Buttons */
         .btn-primary {
-            background: linear-gradient(90deg, #00f2ea, #8523dd);
+            background: linear-gradient(90deg, #7C5CFF, #5B3FD9);
             border: none;
             color: white;
             font-weight: 600;
             font-size: 14px;
             padding: 14px 28px;
             border-radius: 12px;
-            box-shadow: 0 0 20px rgba(0, 242, 234, 0.2);
+            box-shadow: 0 0 20px rgba(124, 92, 255, 0.2);
             transition: all 0.3s ease;
             cursor: pointer;
             display: inline-flex;
@@ -1631,7 +1752,7 @@ class OpusClipPro:
         }
         
         .btn-primary:hover {
-            box-shadow: 0 0 30px rgba(0, 242, 234, 0.4);
+            box-shadow: 0 0 30px rgba(124, 92, 255, 0.4);
             transform: translateY(-1px);
         }
         
@@ -1686,7 +1807,7 @@ class OpusClipPro:
         
         .stitch-input:focus {
             border-color: var(--primary-container);
-            box-shadow: 0 0 0 2px rgba(0, 242, 234, 0.2);
+            box-shadow: 0 0 0 2px rgba(124, 92, 255, 0.2);
         }
         
         .stitch-select {
@@ -1714,10 +1835,10 @@ class OpusClipPro:
         }
         
         .stitch-select-option.active {
-            background: rgba(0, 242, 234, 0.2);
+            background: rgba(124, 92, 255, 0.2);
             color: var(--primary-container);
-            border: 1px solid rgba(0, 242, 234, 0.3);
-            box-shadow: 0 0 10px rgba(0, 242, 234, 0.1);
+            border: 1px solid rgba(124, 92, 255, 0.3);
+            box-shadow: 0 0 10px rgba(124, 92, 255, 0.1);
         }
         
         /* Sliders */
@@ -1743,20 +1864,8 @@ class OpusClipPro:
             border-radius: 50%;
             background: white;
             border: 2px solid var(--primary-container);
-            box-shadow: 0 0 10px rgba(0, 242, 234, 0.5);
+            box-shadow: 0 0 10px rgba(124, 92, 255, 0.5);
             cursor: pointer;
-        }
-        
-        .stitch-slider-value {
-            min-width: 40px;
-            text-align: center;
-            background: var(--surface-container);
-            padding: 4px 12px;
-            border-radius: 6px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: var(--primary-container);
-            font-weight: 600;
-            font-size: 13px;
         }
         
         /* Upload Zone */
@@ -1773,7 +1882,7 @@ class OpusClipPro:
         }
         
         .upload-zone:hover {
-            border-color: rgba(0, 242, 234, 0.5);
+            border-color: rgba(124, 92, 255, 0.5);
             background: rgba(14, 14, 17, 0.6);
         }
         
@@ -1837,8 +1946,8 @@ class OpusClipPro:
         }
         
         .clip-card:hover {
-            border-color: rgba(0, 242, 234, 0.3);
-            box-shadow: 0 0 20px rgba(0, 242, 234, 0.15);
+            border-color: rgba(124, 92, 255, 0.3);
+            box-shadow: 0 0 20px rgba(124, 92, 255, 0.15);
         }
         
         .clip-card-active {
@@ -1872,11 +1981,11 @@ class OpusClipPro:
             backdrop-filter: blur(8px);
             padding: 6px 12px;
             border-radius: 9999px;
-            border: 1px solid rgba(0, 242, 234, 0.3);
+            border: 1px solid rgba(124, 92, 255, 0.3);
             display: flex;
             align-items: center;
             gap: 6px;
-            box-shadow: 0 0 15px rgba(0, 242, 234, 0.2);
+            box-shadow: 0 0 15px rgba(124, 92, 255, 0.2);
         }
         
         .clip-score-icon {
@@ -1966,8 +2075,8 @@ class OpusClipPro:
         }
         
         .timeline-segment-primary {
-            background: rgba(0, 242, 234, 0.2);
-            border-color: rgba(0, 242, 234, 0.5);
+            background: rgba(124, 92, 255, 0.2);
+            border-color: rgba(124, 92, 255, 0.5);
         }
         
         .timeline-segment-secondary {
@@ -2002,16 +2111,16 @@ class OpusClipPro:
         }
         
         .style-card-active {
-            background: rgba(0, 242, 234, 0.1);
-            border-color: rgba(0, 242, 234, 0.5);
-            box-shadow: 0 0 15px rgba(0, 242, 234, 0.1);
+            background: rgba(124, 92, 255, 0.1);
+            border-color: rgba(124, 92, 255, 0.5);
+            box-shadow: 0 0 15px rgba(124, 92, 255, 0.1);
         }
         
         .style-card-active::before {
             content: '';
             position: absolute;
             inset: 0;
-            background: linear-gradient(to bottom, rgba(0, 242, 234, 0.1), transparent);
+            background: linear-gradient(to bottom, rgba(124, 92, 255, 0.1), transparent);
         }
         
         .style-card-icon {
@@ -2050,9 +2159,9 @@ class OpusClipPro:
         }
         
         .toggle-switch-active {
-            background: rgba(0, 242, 234, 0.3);
-            border-color: rgba(0, 242, 234, 0.5);
-            box-shadow: 0 0 10px rgba(0, 242, 234, 0.3);
+            background: rgba(124, 92, 255, 0.3);
+            border-color: rgba(124, 92, 255, 0.5);
+            box-shadow: 0 0 10px rgba(124, 92, 255, 0.3);
         }
         
         .toggle-switch-knob {
@@ -2069,7 +2178,7 @@ class OpusClipPro:
         .toggle-switch-active .toggle-switch-knob {
             background: var(--primary-container);
             left: 22px;
-            box-shadow: 0 0 10px rgba(0, 242, 234, 0.8);
+            box-shadow: 0 0 10px rgba(124, 92, 255, 0.8);
         }
         
         /* AI Tool Row */
@@ -2106,7 +2215,7 @@ class OpusClipPro:
         }
         
         .ai-tool-active .ai-tool-icon {
-            background: rgba(0, 242, 234, 0.1);
+            background: rgba(124, 92, 255, 0.1);
             color: var(--primary-container);
         }
         
@@ -2131,7 +2240,7 @@ class OpusClipPro:
         }
         
         .ai-tool-active .ai-tool-desc {
-            color: rgba(0, 242, 234, 0.7);
+            color: rgba(124, 92, 255, 0.7);
         }
         
         /* Progress Bar */
@@ -2189,7 +2298,7 @@ class OpusClipPro:
         
         .subtitle-row-active {
             background: var(--surface-container);
-            border-color: rgba(0, 242, 234, 0.3);
+            border-color: rgba(124, 92, 255, 0.3);
             position: relative;
         }
         
@@ -2202,7 +2311,7 @@ class OpusClipPro:
             width: 3px;
             background: var(--primary-container);
             border-radius: 8px 0 0 8px;
-            box-shadow: 0 0 8px rgba(0, 242, 234, 0.5);
+            box-shadow: 0 0 8px rgba(124, 92, 255, 0.5);
         }
         
         .subtitle-timestamp {
@@ -2249,7 +2358,7 @@ class OpusClipPro:
         .subtitle-row-active .subtitle-text textarea {
             background: var(--surface-container-high);
             border-color: var(--primary-container);
-            box-shadow: 0 0 10px rgba(0, 242, 234, 0.1);
+            box-shadow: 0 0 10px rgba(124, 92, 255, 0.1);
         }
         
         /* Gallery Grid */
@@ -2339,24 +2448,24 @@ class OpusClipPro:
         
         /* Utility */
         .text-gradient {
-            background: linear-gradient(90deg, #00f2ea, #8523dd);
+            background: linear-gradient(90deg, #7C5CFF, #5B3FD9);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
         
         .glow-cyan {
-            box-shadow: 0 0 20px rgba(0, 242, 234, 0.3);
+            box-shadow: 0 0 20px rgba(124, 92, 255, 0.3);
         }
         
         .glow-purple {
-            box-shadow: 0 0 20px rgba(133, 35, 221, 0.3);
+            box-shadow: 0 0 20px rgba(91, 63, 217, 0.3);
         }
         
         /* Animation */
         @keyframes pulse-glow {
-            0%, 100% { box-shadow: 0 0 20px rgba(0, 242, 234, 0.3); }
-            50% { box-shadow: 0 0 30px rgba(0, 242, 234, 0.5); }
+            0%, 100% { box-shadow: 0 0 20px rgba(124, 92, 255, 0.3); }
+            50% { box-shadow: 0 0 30px rgba(124, 92, 255, 0.5); }
         }
         
         .animate-pulse-glow {
@@ -2396,12 +2505,37 @@ class OpusClipPro:
             color: #e4e1e6 !important;
         }
         .nav-btn:active {
-            background: rgba(0, 242, 234, 0.1) !important;
+            background: rgba(124, 92, 255, 0.1) !important;
         }
         .nav-btn-active {
-            background: linear-gradient(90deg, rgba(0, 242, 234, 0.15), transparent) !important;
-            color: #00f2ea !important;
-            border-right: 2px solid #00f2ea !important;
+            background: linear-gradient(90deg, rgba(124, 92, 255, 0.15), transparent) !important;
+            color: #7C5CFF !important;
+            border-right: 2px solid #7C5CFF !important;
+        }
+
+        /* Analysis presets */
+        .preset-row {
+            display: grid !important;
+            grid-template-columns: repeat(3, 1fr) !important;
+            gap: 8px;
+        }
+        .preset-btn {
+            min-width: 0 !important;
+            width: 100% !important;
+            background: var(--surface-container-highest) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            color: var(--on-surface-variant) !important;
+            font-weight: 600 !important;
+            font-size: 12px !important;
+            padding: 10px 6px !important;
+            border-radius: 8px !important;
+            transition: all 0.2s ease !important;
+            box-shadow: none !important;
+            white-space: nowrap !important;
+        }
+        .preset-btn:hover {
+            border-color: rgba(124, 92, 255, 0.4) !important;
+            color: var(--on-surface) !important;
         }
         
         /* Nav container */
@@ -2429,8 +2563,8 @@ class OpusClipPro:
             min-height: 180px !important;
         }
         .clean-file-input .wrap:hover {
-            border-color: #00f2ea !important;
-            background: rgba(0, 242, 234, 0.05) !important;
+            border-color: #7C5CFF !important;
+            background: rgba(124, 92, 255, 0.05) !important;
         }
         .clean-file-input .file-preview {
             display: none !important;
@@ -2457,13 +2591,13 @@ class OpusClipPro:
             transition: all 0.2s !important;
         }
         .style-card-btn:hover {
-            border-color: #00f2ea !important;
-            background: rgba(0, 242, 234, 0.1) !important;
+            border-color: #7C5CFF !important;
+            background: rgba(124, 92, 255, 0.1) !important;
         }
         .style-card-active {
-            background: rgba(0, 242, 234, 0.15) !important;
-            border-color: #00f2ea !important;
-            color: #00f2ea !important;
+            background: rgba(124, 92, 255, 0.15) !important;
+            border-color: #7C5CFF !important;
+            color: #7C5CFF !important;
         }
         
         /* Clip cards container */
@@ -2481,7 +2615,7 @@ class OpusClipPro:
             border-radius: 3px;
         }
         .clip-cards-container::-webkit-scrollbar-thumb {
-            background: rgba(0, 242, 234, 0.4);
+            background: rgba(124, 92, 255, 0.4);
             border-radius: 3px;
         }
         .clip-card-placeholder {
@@ -2549,11 +2683,7 @@ class OpusClipPro:
                         nav_import_btn = gr.Button("Importar", elem_classes=["nav-btn", "nav-btn-active"])
                         nav_edit_btn = gr.Button("Editar", elem_classes=["nav-btn"])
                         nav_export_btn = gr.Button("Exportar", elem_classes=["nav-btn"])
-                    
-                    gr.HTML("""<div style="margin-top: auto; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 16px; margin-bottom: 8px;">""")
-                    gr.Button("Recursos  🔒", elem_classes=["nav-btn"], interactive=False)
-                    gr.Button("Ajustes   🔒", elem_classes=["nav-btn"], interactive=False)
-                
+
                 # Main Content Area
                 with gr.Column(scale=10, elem_classes=["stitch-main"]):
                     # Top Bar
@@ -2584,8 +2714,8 @@ class OpusClipPro:
                         wizard_bar = gr.HTML("""
                         <div style="display:flex;align-items:center;gap:0;margin-bottom:24px;background:rgba(22,33,62,0.6);border-radius:12px;padding:16px 24px;border:1px solid rgba(255,255,255,0.07);">
                           <div id="wstep1" style="display:flex;align-items:center;gap:8px;flex:1;">
-                            <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#00f2ea,#8523dd);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;">1</div>
-                            <span style="font-size:14px;font-weight:600;color:#00f2ea;">Subir &amp; Analizar</span>
+                            <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#7C5CFF,#5B3FD9);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:#fff;">1</div>
+                            <span style="font-size:14px;font-weight:600;color:#7C5CFF;">Subir &amp; Analizar</span>
                           </div>
                           <div style="flex:0.3;height:2px;background:rgba(255,255,255,0.1);"></div>
                           <div id="wstep2" style="display:flex;align-items:center;gap:8px;flex:1;opacity:0.4;">
@@ -2607,9 +2737,23 @@ class OpusClipPro:
                                 <h1 style="font-size: 32px; font-weight: 700; color: #e4e1e6; margin-bottom: 8px;">
                                     Importar Video
                                 </h1>
-                                <p style="font-size: 16px; color: #b9cac8;">
-                                    Sube tu video fuente y configura los ajustes de análisis IA.
+                                <p style="font-size: 16px; color: #b9cac8; margin-bottom: 20px;">
+                                    Sube tu video fuente y dejá que la IA encuentre los mejores clips.
                                 </p>
+                                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                                    <div class="glass-panel-sm" style="flex:1;min-width:200px;padding:14px 18px;display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:20px;line-height:1;">1️⃣</span>
+                                        <span style="font-size:13px;color:#b9cac8;">Subí tu video</span>
+                                    </div>
+                                    <div class="glass-panel-sm" style="flex:1;min-width:200px;padding:14px 18px;display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:20px;line-height:1;">2️⃣</span>
+                                        <span style="font-size:13px;color:#b9cac8;">La IA encuentra los mejores momentos</span>
+                                    </div>
+                                    <div class="glass-panel-sm" style="flex:1;min-width:200px;padding:14px 18px;display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:20px;line-height:1;">3️⃣</span>
+                                        <span style="font-size:13px;color:#b9cac8;">Exportá listo para TikTok / Reels / Shorts</span>
+                                    </div>
+                                </div>
                             </div>
                             """)
                             
@@ -2665,51 +2809,55 @@ class OpusClipPro:
                                         """)
                                         
                                         with gr.Column(elem_classes=["glass-panel-sm"], scale=1):
-                                            # Target Clip Count
-                                            gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin-bottom: 8px; display: block;">Cantidad de Clips Objetivo</label>""")
-                                            with gr.Row():
+                                            # Quick presets (default experience for non-technical users)
+                                            gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin-bottom: 8px; display: block;">Elegí un estilo de análisis</label>""")
+                                            with gr.Row(elem_classes=["preset-row"]):
+                                                preset_fast_btn = gr.Button("💨 Rápido", elem_classes=["preset-btn"], size="sm")
+                                                preset_balance_btn = gr.Button("⚖️ Balanceado ★", elem_classes=["preset-btn"], size="sm")
+                                                preset_quality_btn = gr.Button("🎯 Calidad", elem_classes=["preset-btn"], size="sm")
+                                            gr.HTML("""<p style="font-size: 12px; color: #b9cac8; margin-top: 8px;">★ Balanceado funciona bien para la mayoría de los videos. Para ajustar todo a mano, abrí "Ajustes avanzados".</p>""")
+
+                                            with gr.Accordion("⚙️ Ajustes avanzados (opcional)", open=False):
+                                                # Target Clip Count
+                                                gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin-bottom: 8px; display: block;">Cantidad de Clips Objetivo</label>""")
                                                 num_clips = gr.Slider(1, 30, value=15, step=1, label="", show_label=False)
-                                                gr.HTML("""<span class="stitch-slider-value">15</span>""")
-                                            
-                                            # Duration Range
-                                            gr.HTML("""
-                                            <div style="margin-top: 16px;">
-                                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+
+                                                # Duration Range
+                                                gr.HTML("""
+                                                <div style="margin-top: 16px; margin-bottom: 8px;">
                                                     <label style="font-size: 14px; font-weight: 600; color: #e4e1e6;">Rango de Duración de Clips</label>
-                                                    <span style="font-size: 12px; color: #b9cac8;">15s - 60s</span>
                                                 </div>
-                                            </div>
-                                            """)
-                                            with gr.Row():
-                                                min_duration = gr.Slider(5, 180, value=15, step=5, label="", show_label=False)
-                                                max_duration = gr.Slider(15, 300, value=60, step=5, label="", show_label=False)
-                                            
-                                            # Whisper Model
-                                            gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin: 16px 0 8px; display: block;">Modelo Whisper IA</label>""")
-                                            model_size_dropdown = gr.Dropdown(
-                                                choices=[
-                                                    ("Tiny (más rápido)", "tiny"),
-                                                    ("Base (balanceado)", "base"),
-                                                    ("Small (preciso)", "small"),
-                                                ],
-                                                value="base",
-                                                label="",
-                                                show_label=False
-                                            )
-                                            gr.HTML("""<p style="font-size: 12px; color: #b9cac8; margin-top: 8px;">Base proporciona el mejor balance de velocidad y precisión.</p>""")
-                                            
-                                            # Analysis mode
-                                            gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin: 16px 0 8px; display: block;">⚡ Modo de Análisis</label>""")
-                                            analysis_mode_dropdown = gr.Dropdown(
-                                                choices=[
-                                                    ("💨 Rápido (sin timestamps por palabra)", "fast"),
-                                                    ("⚖️ Balance (2 pasadas, recomendado)", "balance"),
-                                                    ("🎯 Calidad (timestamps completos)", "quality"),
-                                                ],
-                                                value="balance",
-                                                label="",
-                                                show_label=False
-                                            )
+                                                """)
+                                                with gr.Row():
+                                                    min_duration = gr.Slider(5, 180, value=15, step=5, label="", show_label=False)
+                                                    max_duration = gr.Slider(15, 300, value=60, step=5, label="", show_label=False)
+
+                                                # Whisper Model
+                                                gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin: 16px 0 8px; display: block;">Modelo Whisper IA</label>""")
+                                                model_size_dropdown = gr.Dropdown(
+                                                    choices=[
+                                                        ("Tiny (más rápido)", "tiny"),
+                                                        ("Base (balanceado)", "base"),
+                                                        ("Small (preciso)", "small"),
+                                                    ],
+                                                    value="base",
+                                                    label="",
+                                                    show_label=False
+                                                )
+                                                gr.HTML("""<p style="font-size: 12px; color: #b9cac8; margin-top: 8px;">Base proporciona el mejor balance de velocidad y precisión.</p>""")
+
+                                                # Analysis mode
+                                                gr.HTML("""<label style="font-size: 14px; font-weight: 600; color: #e4e1e6; margin: 16px 0 8px; display: block;">⚡ Modo de Análisis</label>""")
+                                                analysis_mode_dropdown = gr.Dropdown(
+                                                    choices=[
+                                                        ("💨 Rápido (sin timestamps por palabra)", "fast"),
+                                                        ("⚖️ Balance (2 pasadas, recomendado)", "balance"),
+                                                        ("🎯 Calidad (timestamps completos)", "quality"),
+                                                    ],
+                                                    value="balance",
+                                                    label="",
+                                                    show_label=False
+                                                )
 
                                             # Precheck info (filled on video select)
                                             video_precheck = gr.HTML("")
@@ -2870,7 +3018,7 @@ class OpusClipPro:
                                                 <span class="material-symbols-outlined">subtitles</span>
                                                 <div class="panel-header-title" style="margin: 0;">Subtítulos</div>
                                             </div>
-                                            <button class="btn-ghost" style="color: #00f2ea;">Estilos</button>
+                                            <button class="btn-ghost" style="color: #7C5CFF;">Estilos</button>
                                         </div>
                                         """)
                                         
@@ -2879,7 +3027,8 @@ class OpusClipPro:
                                             label="",
                                             show_label=False,
                                             wrap=True,
-                                            interactive=True
+                                            interactive=True,
+                                            type="array",
                                         )
                                         
                                         with gr.Row():
@@ -2979,13 +3128,31 @@ class OpusClipPro:
                                                     label="",
                                                     show_label=False
                                                 )
-                                
+
+                                            with gr.Row(elem_classes=["ai-tool"]):
+                                                gr.HTML("""
+                                                <div class="ai-tool-left">
+                                                    <div class="ai-tool-icon">
+                                                        <span class="material-symbols-outlined">tag</span>
+                                                    </div>
+                                                    <div class="ai-tool-info">
+                                                        <div class="ai-tool-name">Hook al Inicio</div>
+                                                        <div class="ai-tool-desc">Quema la frase gancho de la IA en pantalla los primeros segundos, con el mismo estilo visual elegido arriba</div>
+                                                    </div>
+                                                </div>
+                                                """)
+                                                show_hook_checkbox = gr.Checkbox(
+                                                    label="",
+                                                    value=True,
+                                                    show_label=False,
+                                                )
+
                                 # Right: Export Action
                                 with gr.Column(scale=4):
                                     with gr.Column(elem_classes=["glass-panel"]):
                                         gr.HTML("""
                                         <div class="panel-header" style="display: flex; align-items: center; gap: 8px;">
-                                            <span class="material-symbols-outlined" style="color: #00f2ea;">rocket_launch</span>
+                                            <span class="material-symbols-outlined" style="color: #7C5CFF;">rocket_launch</span>
                                             <div class="panel-header-title" style="margin: 0;">Listo para Renderizar</div>
                                         </div>
                                         """)
@@ -3064,8 +3231,8 @@ class OpusClipPro:
                                         )
                                         brand_color_input = gr.Textbox(
                                             label="",
-                                            value="#00f2ea",
-                                            placeholder="Color primario (#00f2ea)",
+                                            value="#7C5CFF",
+                                            placeholder="Color primario (#7C5CFF)",
                                             show_label=False
                                         )
                                         
@@ -3084,7 +3251,7 @@ class OpusClipPro:
                                 gr.HTML("""
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                                     <div class="panel-header-title" style="margin: 0;">Exports Recientes</div>
-                                    <button class="btn-ghost" style="color: #00f2ea; display: flex; align-items: center; gap: 4px;">
+                                    <button class="btn-ghost" style="color: #7C5CFF; display: flex; align-items: center; gap: 4px;">
                                         Ver Todos <span class="material-symbols-outlined" style="font-size: 16px;">arrow_forward</span>
                                     </button>
                                 </div>
@@ -3144,11 +3311,11 @@ class OpusClipPro:
                     eta_str = f"{int(est//60)}m {int(est%60)}s" if est >= 60 else f"{est:.0f}s"
                     mode_est = int(est * 0.6)  # balance ~40% faster
                     mode_str = f"{int(mode_est//60)}m {int(mode_est%60)}s" if mode_est >= 60 else f"{mode_est:.0f}s"
-                    cache_badge = ' <span style="background:#00f2ea22;color:#00f2ea;padding:2px 7px;border-radius:10px;font-size:11px;">⚡ caché</span>' if info['cached'] else ''
+                    cache_badge = ' <span style="background:#7C5CFF22;color:#7C5CFF;padding:2px 7px;border-radius:10px;font-size:11px;">⚡ caché</span>' if info['cached'] else ''
                     chunked_badge = ' <span style="background:#f59e0b22;color:#f59e0b;padding:2px 7px;border-radius:10px;font-size:11px;">chunks</span>' if info['chunked'] else ''
                     html = f"""<div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:10px 14px;margin:8px 0;font-size:13px;color:#b9cac8;">
                         <b style="color:#e4e1e6;">⏱️ Video: {dur:.1f} min</b>{cache_badge}{chunked_badge}<br>
-                        ETA modo Balance: <b style="color:#00f2ea;">~{mode_str}</b> &nbsp;|
+                        ETA modo Balance: <b style="color:#7C5CFF;">~{mode_str}</b> &nbsp;|
                         ETA Calidad: ~{eta_str}
                     </div>"""
                     vi_text = f"⏱️ {dur:.1f} min | ETA ~{mode_str} (balance)"
@@ -3162,6 +3329,17 @@ class OpusClipPro:
                 inputs=[video_input, model_size_dropdown],
                 outputs=[video_precheck, video_info]
             )
+
+            def _apply_analysis_preset(n_clips: int, mn: int, mx: int, model: str, mode: str):
+                return (
+                    gr.update(value=n_clips), gr.update(value=mn), gr.update(value=mx),
+                    gr.update(value=model), gr.update(value=mode)
+                )
+
+            preset_outputs = [num_clips, min_duration, max_duration, model_size_dropdown, analysis_mode_dropdown]
+            preset_fast_btn.click(fn=lambda: _apply_analysis_preset(8, 15, 45, "tiny", "fast"), inputs=[], outputs=preset_outputs)
+            preset_balance_btn.click(fn=lambda: _apply_analysis_preset(15, 15, 60, "base", "balance"), inputs=[], outputs=preset_outputs)
+            preset_quality_btn.click(fn=lambda: _apply_analysis_preset(10, 20, 90, "small", "quality"), inputs=[], outputs=preset_outputs)
 
             def on_analyze(video, n_clips, min_dur, max_dur, model_sz, custom_p, mode, progress=gr.Progress()):
                 if not video:
@@ -3304,7 +3482,7 @@ class OpusClipPro:
                 value_s = getattr(clip, 'value_score', 0)
                 trend_s = getattr(clip, 'trend_score', 5)
                 recipe_html = (
-                    f'<div style="background:#0d1b2a;border-left:3px solid #00f2ea;border-radius:6px;'
+                    f'<div style="background:#0d1b2a;border-left:3px solid #7C5CFF;border-radius:6px;'
                     f'padding:8px 10px;margin-top:10px;font-size:0.8em;color:#a8d8ea;">'
                     f'🎨 <strong>Receta de edición:</strong> {edit_recipe}</div>'
                 ) if edit_recipe else ''
@@ -3312,11 +3490,12 @@ class OpusClipPro:
                 <div style="background: #16213e; padding: 15px; border-radius: 10px;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                         <h4 style="margin: 0; color: #e4e1e6;">🎬 Clip {clip_id + 1}</h4>
-                        <div style="text-align: center; background: {sc}22; border: 2px solid {sc};
-                                    border-radius: 50%; width: 56px; height: 56px; display: flex;
-                                    flex-direction: column; align-items: center; justify-content: center;">
-                            <span style="color: {sc}; font-weight: 900; font-size: 1.2em; line-height: 1;">{clip.virality_score:.1f}</span>
-                            <span style="color: {sc}88; font-size: 0.6em;">/ 10</span>
+                        <div style="text-align: center; background: {sc}22; border: 3px solid {sc};
+                                    border-radius: 50%; width: 72px; height: 72px; display: flex;
+                                    flex-direction: column; align-items: center; justify-content: center;
+                                    box-shadow: 0 0 16px {sc}55;">
+                            <span style="color: {sc}; font-weight: 900; font-size: 1.6em; line-height: 1;">{clip.virality_score:.1f}</span>
+                            <span style="color: {sc}aa; font-size: 0.58em; letter-spacing: 0.04em; text-transform: uppercase;">Virality</span>
                         </div>
                     </div>
                     <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;">
@@ -3378,6 +3557,12 @@ class OpusClipPro:
                 outputs=[preview_video]
             )
             
+            subtitle_df.input(
+                fn=lambda df_data, cid: self.update_subtitles_from_dataframe(cid, df_data),
+                inputs=[subtitle_df, selected_clip_id],
+                outputs=[subtitle_status, subtitle_df]
+            )
+
             refresh_subs_btn.click(
                 fn=lambda cid: self.get_subtitle_data(cid),
                 inputs=[selected_clip_id],
@@ -3409,16 +3594,17 @@ class OpusClipPro:
             )
             
             export_btn.click(
-                fn=lambda style, sub_mode, face_track, platform, srt, vtt, brand, brand_color, mood_grade, ducking, zoom, pauses, prog=gr.Progress(): self.export_clips(
+                fn=lambda style, sub_mode, face_track, platform, srt, vtt, brand, brand_color, mood_grade, ducking, zoom, pauses, hook, prog=gr.Progress(): self.export_clips(
                     style, prog, parallel=True, track_faces=face_track, subtitle_mode=sub_mode,
                     platform=platform, export_srt=srt, export_vtt=vtt,
                     brand_name=brand, brand_color=brand_color,
                     enable_mood_grade=mood_grade, enable_ducking=ducking,
-                    enable_zoom_cues=zoom, compress_pauses=pauses
+                    enable_zoom_cues=zoom, compress_pauses=pauses, show_hook=hook
                 ),
                 inputs=[style_dropdown, subtitle_mode_dropdown, face_tracking_checkbox, platform_preset,
                         export_srt_checkbox, export_vtt_checkbox, brand_name_input, brand_color_input,
-                        mood_grade_checkbox, audio_ducking_checkbox, zoom_cues_checkbox, compress_pauses_checkbox],
+                        mood_grade_checkbox, audio_ducking_checkbox, zoom_cues_checkbox, compress_pauses_checkbox,
+                        show_hook_checkbox],
                 outputs=[export_status, output_gallery, output_files, captions_output]
             )
             

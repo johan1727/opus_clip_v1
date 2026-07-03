@@ -165,9 +165,13 @@ class Transcriber:
         if not video_path.exists():
             raise FileNotFoundError(f"Video no encontrado: {video_path}")
         
-        # Generar ruta de salida temporal si no se proporciona
+        # Generar ruta de salida temporal si no se proporciona — antes se escribía junto
+        # al video fuente, lo que falla en carpetas de solo lectura y ensucia la carpeta
+        # del usuario con archivos .mp3 temporales.
         if output_audio_path is None:
-            output_audio_path = video_path.parent / f"{video_path.stem}_audio.mp3"
+            temp_dir = Path("temp")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            output_audio_path = temp_dir / f"{video_path.stem}_audio.mp3"
         else:
             output_audio_path = Path(output_audio_path)
         
@@ -222,12 +226,12 @@ class Transcriber:
             h.update(f.read(1024 * 1024))
         return h.hexdigest()[:16]
 
-    def _cache_path(self, video_path: Path) -> Path:
-        key = f"{video_path.stem}_{self._video_hash(video_path)}_{self.model_size}.json"
+    def _cache_path(self, video_path: Path, suffix: str = "") -> Path:
+        key = f"{video_path.stem}_{self._video_hash(video_path)}_{self.model_size}{suffix}.json"
         return self.CACHE_DIR / key
 
-    def _load_cache(self, video_path: Path) -> Optional[Dict[str, Any]]:
-        cp = self._cache_path(video_path)
+    def _load_cache(self, video_path: Path, suffix: str = "") -> Optional[Dict[str, Any]]:
+        cp = self._cache_path(video_path, suffix)
         if cp.exists():
             try:
                 data = json.loads(cp.read_text(encoding='utf-8'))
@@ -237,8 +241,8 @@ class Transcriber:
                 logger.warning(f"Caché corrupto, ignorando: {e}")
         return None
 
-    def _save_cache(self, video_path: Path, data: Dict[str, Any]) -> None:
-        cp = self._cache_path(video_path)
+    def _save_cache(self, video_path: Path, data: Dict[str, Any], suffix: str = "") -> None:
+        cp = self._cache_path(video_path, suffix)
         try:
             cp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
             logger.info(f"💾 Transcripción guardada en caché: {cp.name}")
@@ -558,6 +562,7 @@ class Transcriber:
         chunk_duration: int = None,
         overlap: int = None,
         word_timestamps: Optional[bool] = None,
+        cache_key_suffix: str = "",
     ) -> Dict[str, Any]:
         """
         Transcribe videos largos (1h+) dividiendo el audio en chunks.
@@ -568,6 +573,11 @@ class Transcriber:
             progress_callback: (progress 0-1, mensaje)
             chunk_duration: Duración de cada chunk en segundos (default 600)
             overlap: Overlap entre chunks en segundos (default 15)
+            cache_key_suffix: Sufijo extra para diferenciar caché (ej. "_fast") — sin esto,
+                una transcripción rápida (sin word-timestamps) y una de calidad (con
+                word-timestamps) del MISMO video compartían la misma entrada de caché, y
+                un run de "Calidad" podía recibir en silencio los datos degradados del
+                run "Rápido" anterior.
 
         Returns:
             Dict con: 'text', 'segments', 'word_segments', 'language', 'duration'
@@ -582,7 +592,7 @@ class Transcriber:
 
         # --- Cache hit? ---
         if self.use_cache:
-            cached = self._load_cache(video_path)
+            cached = self._load_cache(video_path, cache_key_suffix)
             if cached is not None:
                 if progress_callback:
                     progress_callback(1.0, "⚡ Transcripción lista (caché)")
@@ -591,11 +601,13 @@ class Transcriber:
         total_duration = self._get_video_duration(str(video_path))
         if total_duration == 0:
             logger.warning("No se pudo obtener duración; usando transcribe() normal")
-            return self.transcribe(str(video_path), progress_callback=progress_callback)
+            return self.transcribe(str(video_path), progress_callback=progress_callback,
+                                    word_timestamps=word_timestamps, cache_key_suffix=cache_key_suffix)
 
         # Para videos cortos, usar el flujo normal
         if total_duration <= chunk_dur * 1.5:
-            return self.transcribe(str(video_path), progress_callback=progress_callback)
+            return self.transcribe(str(video_path), progress_callback=progress_callback,
+                                    word_timestamps=word_timestamps, cache_key_suffix=cache_key_suffix)
 
         model = self.load_model()
         logger.info(f"📦 Transcripción chunked: {total_duration:.0f}s en chunks de {chunk_dur}s (overlap {ovlp}s)")
@@ -744,7 +756,7 @@ class Transcriber:
         )
 
         if self.use_cache:
-            self._save_cache(video_path, transcription_data)
+            self._save_cache(video_path, transcription_data, cache_key_suffix)
 
         if progress_callback:
             progress_callback(1.0, f"✅ Transcripción lista ({len(all_segments)} segmentos)")

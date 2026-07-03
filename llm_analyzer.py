@@ -213,6 +213,29 @@ class GeminiAnalyzer:
                 raise
         raise RuntimeError(f"Todas las API keys de Gemini agotaron su cuota: {last_error}")
 
+    def _windowed_transcript(self, segments: List[Dict[str, Any]], window_secs: float = 20.0) -> List[str]:
+        """
+        Agrupa segmentos de Whisper en ventanas de `window_secs` segundos para reducir
+        tokens sin perder cobertura del video completo (en vez de truncar por caracteres,
+        que dejaba a Gemini "ciego" para todo lo que pasaba después del corte).
+        """
+        if not segments:
+            return []
+        windows = []
+        window_start = segments[0]['start']
+        window_texts = []
+        for seg in segments:
+            if seg['start'] - window_start > window_secs:
+                if window_texts:
+                    windows.append(f"[{window_start:.0f}s] {' '.join(window_texts)}")
+                window_start = seg['start']
+                window_texts = [seg['text'].strip()]
+            else:
+                window_texts.append(seg['text'].strip())
+        if window_texts:
+            windows.append(f"[{window_start:.0f}s] {' '.join(window_texts)}")
+        return windows
+
     def _build_prompt(
         self,
         transcription: Dict[str, Any],
@@ -244,23 +267,7 @@ class GeminiAnalyzer:
         # In compact mode: merge segments into ~20s windows to reduce tokens
         transcript_with_time = []
         if compact and len(segments) > 120:
-            window_secs = 20.0
-            window_start = segments[0]['start'] if segments else 0
-            window_texts = []
-            for seg in segments:
-                if seg['start'] - window_start > window_secs:
-                    if window_texts:
-                        transcript_with_time.append(
-                            f"[{window_start:.0f}s] {' '.join(window_texts)}"
-                        )
-                    window_start = seg['start']
-                    window_texts = [seg['text'].strip()]
-                else:
-                    window_texts.append(seg['text'].strip())
-            if window_texts:
-                transcript_with_time.append(
-                    f"[{window_start:.0f}s] {' '.join(window_texts)}"
-                )
+            transcript_with_time = self._windowed_transcript(segments, window_secs=20.0)
         else:
             for seg in segments:
                 start = seg['start']
@@ -628,10 +635,11 @@ Identifica ahora los {num_clips} mejores clips:"""
         retry_attempts: int = 3,
         progress_callback: Optional[Callable[[float, str], None]] = None,
         custom_prompt: str = "",
+        frame_timestamps: Optional[List[float]] = None,
     ) -> List[ViralClip]:
         """
         Analiza transcripción + frames de video para identificar clips virales.
-        
+
         Args:
             transcription: Dict con 'text', 'segments', 'duration'
             frames: Lista de PIL.Image objects (keyframes del video)
@@ -640,31 +648,49 @@ Identifica ahora los {num_clips} mejores clips:"""
             retry_attempts: Intentos en caso de error
             progress_callback: Función opcional(progress: float, message: str)
             custom_prompt: Instrucción adicional del usuario
-            
+            frame_timestamps: Segundo exacto de cada frame adjunto (mismo orden que `frames`),
+                para que Gemini pueda ubicar cada imagen en el tiempo del video
+
         Returns:
             Lista de objetos ViralClip ordenados por score
         """
         if self.model is None:
             raise RuntimeError("Modelo no inicializado")
-        
+
         def update_progress(p: float, msg: str):
             if progress_callback:
                 progress_callback(p, msg)
-        
-        # Build enhanced prompt with visual context
-        full_text = transcription.get('text', '')[:2000]  # Limit text
+
+        # Transcripción completa con timestamps por ventanas de 20s — antes se mandaban
+        # solo los primeros 2000 caracteres de texto plano SIN timestamps, así que Gemini
+        # no podía ubicar en el tiempo nada que pasara después del minuto ~3-5 del video,
+        # y encima tenía que "inventar" los start/end porque no tenía ninguna referencia.
+        segments = transcription.get('segments', [])
+        transcript_with_time = self._windowed_transcript(segments, window_secs=20.0) if segments else []
+        full_text = "\n".join(transcript_with_time) if transcript_with_time else transcription.get('text', '')[:2000]
         min_dur, max_dur = clip_duration_range
-        
-        visual_context = f"""
-Se han adjuntado {len(frames)} frames representativos del video, distribuidos uniformemente en el tiempo.
+
+        sent_frames = frames[:8]
+        if frame_timestamps:
+            frame_times_used = frame_timestamps[:len(sent_frames)]
+            frame_times_str = ", ".join(f"{t:.0f}s" for t in frame_times_used)
+            visual_context = f"""
+Se han adjuntado {len(sent_frames)} frames representativos del video, EN ESTE ORDEN, correspondientes
+a los siguientes segundos del video: {frame_times_str}
+Analiza estos frames junto con la transcripción para identificar momentos visualmente impactantes,
+usando su timestamp para ubicar el frame en el video.
+""" if sent_frames else ""
+        else:
+            visual_context = f"""
+Se han adjuntado {len(sent_frames)} frames representativos del video, distribuidos uniformemente en el tiempo.
 Analiza estos frames junto con la transcripción para identificar momentos visualmente impactantes.
-""" if frames else ""
+""" if sent_frames else ""
 
         prompt = f"""Eres un Senior Virality Engineer especializado en contenido de PERSONAS HABLANDO. Analiza los frames adjuntos + transcripción para identificar los {num_clips} MEJORES clips virales para TikTok/Reels/Shorts.
 
 {visual_context}
 
-### VIDEO - TRANSCRIPCIÓN
+### VIDEO - TRANSCRIPCIÓN CON TIMESTAMPS
 {full_text}
 
 ### ANÁLISIS VISUAL DE FRAMES - PRIORIDADES
@@ -737,10 +763,11 @@ Identifica los {num_clips} mejores clips:"""
                 update_progress(0.1 * attempt, f" Analizando con Gemini + frames (intento {attempt + 1}/{retry_attempts})...")
                 logger.info(f"Enviando análisis multimodal a Gemini (intento {attempt + 1}/{retry_attempts})...")
                 
-                # Build content list with prompt + frames
+                # Build content list with prompt + frames (mismos frames referenciados
+                # en el prompt vía frame_timestamps, no un slice distinto)
                 content = [prompt]
-                if frames:
-                    content.extend(frames[:8])  # Max 8 frames to avoid token limit
+                if sent_frames:
+                    content.extend(sent_frames)
                 
                 response = self._generate_with_rotation(
                     content,
@@ -859,9 +886,16 @@ Identifica los {num_clips} mejores clips:"""
         
         valid = []
         for clip in clips:
-            # Duration check
+            # Duration check — un clip apenas más largo que max_duration se recorta al
+            # límite en vez de descartarse entero; solo se descarta si queda por debajo
+            # del mínimo tras el recorte (Gemini a veces se pasa por 1-2s del rango pedido,
+            # y tirar el clip completo por eso perdía contenido bueno sin necesidad).
             clip_duration = clip.end - clip.start
-            if clip_duration < min_duration or clip_duration > max_duration:
+            if clip_duration > max_duration:
+                clip.end = clip.start + max_duration
+                clip_duration = max_duration
+                logger.info(f"Clip recortado a {max_duration}s (excedía el máximo): {clip.start:.1f}s-{clip.end:.1f}s")
+            if clip_duration < min_duration:
                 logger.warning(f"Clip descartado por duración: {clip.start:.1f}s-{clip.end:.1f}s ({clip_duration:.1f}s)")
                 continue
             

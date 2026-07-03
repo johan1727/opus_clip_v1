@@ -116,7 +116,7 @@ class AudioAnalyzerEnhanced:
             audio_score = 1.0 if seg.is_silence else max(0,min(10,((seg.rms_db-min_rms)/rms_range)*10))
             wps = word_density.get(int(mid),0)
             speech_score = min(10,(wps/max_wps)*10) if max_wps > 0 else 5.0
-            scene_score = max((10-abs(mid-sc)*5) for sc in scene_changes if abs(mid-sc)<2) if scene_changes else 0.0
+            scene_score = max(((10-abs(mid-sc)*5) for sc in scene_changes if abs(mid-sc)<2), default=0.0)
             silence_score = 0.0  # calculated below
             for ss, se in [(s.rms_db,s.silence_duration) for s in segments if s.is_silence]:
                 pass  # simplified
