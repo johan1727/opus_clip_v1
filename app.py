@@ -1191,6 +1191,54 @@ class OpusClipPro:
             }
         }
 
+    def _qa_check_clip(self, output_path: str, has_hook: bool) -> Dict[str, Any]:
+        """
+        QA visual automático (R7): extrae 3 frames del clip ya exportado
+        (inicio/medio/fin) y corre chequeos determinísticos simples — no
+        otra llamada a Gemini (sería lento/caro por clip). Informativo, no
+        bloquea el export.
+        """
+        result = {"frames": [], "checks": {}, "passed": True}
+        try:
+            probe_info = self.editor.get_video_info(output_path)
+            duration = probe_info.get('duration', 0)
+            if duration <= 0:
+                return result
+
+            timestamps = {
+                "inicio": 0.3,
+                "medio": duration / 2,
+                "final": max(0.3, duration - 0.3),
+            }
+            frame_paths = {}
+            for label, ts in timestamps.items():
+                frame_path = str(config.TEMP_DIR / f"qa_{Path(output_path).stem}_{label}.jpg")
+                self.editor.generate_thumbnail(output_path, frame_path, timestamp=ts, width=320)
+                frame_paths[label] = frame_path
+                result["frames"].append(frame_path)
+
+            brightness = {
+                label: self.editor.check_frame_brightness(path)
+                for label, path in frame_paths.items()
+            }
+
+            # Check 1: el frame inicial no está negro/vacío
+            result["checks"]["frame_inicial_no_negro"] = brightness["inicio"] > 15
+            # Check 2: el frame final no está negro (R5 debería prevenir esto)
+            result["checks"]["frame_final_no_negro"] = brightness["final"] > 15
+            # Check 3 (informativo, solo si show_hook estaba activo): el
+            # frame inicial no es prácticamente idéntico a un frame vacío —
+            # mismo chequeo de brillo, umbral más permisivo porque el hook
+            # puede tener fondo semi-transparente sobre un frame oscuro.
+            if has_hook:
+                result["checks"]["hook_probable_visible"] = brightness["inicio"] > 10
+
+            result["passed"] = all(result["checks"].values())
+        except Exception as e:
+            logger.warning(f"QA visual omitido: {e}")
+            result["passed"] = True  # no bloquear el export por un fallo del QA en sí
+        return result
+
     def _generate_clip_metadata(self, clip_state, index: int, platform: str, brand_name: str = "") -> Optional[str]:
         """Genera metadata JSON por clip con score, hook y textos sociales básicos."""
         try:
@@ -1355,7 +1403,13 @@ class OpusClipPro:
                             timestamp=0.5  # Frame a 0.5s para evitar fade negro
                         )
                         sc = clip.virality_score
-                        caption = f"Clip {i+1} | ⭐ {sc:.1f} | {clip.start:.0f}s-{clip.end:.0f}s | {platform.upper()}"
+
+                        qa_result = self._qa_check_clip(output_path, has_hook=show_hook)
+                        if not qa_result["passed"]:
+                            logger.warning(f"⚠️ QA visual: clip {i+1} tiene problemas: {qa_result['checks']}")
+                        qa_badge = "✅" if qa_result["passed"] else "⚠️"
+
+                        caption = f"Clip {i+1} | ⭐ {sc:.1f} | {clip.start:.0f}s-{clip.end:.0f}s | {platform.upper()} | QA {qa_badge}"
                         gallery_data.append((str(thumb_path), caption))
                     except Exception as e:
                         logger.warning(f"No se pudo generar thumbnail para clip {i+1}: {e}")

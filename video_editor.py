@@ -1193,7 +1193,18 @@ class VideoEditor:
         except ffmpeg.Error as e:
             logger.error(f"Error generando thumbnail: {e}")
             raise
-    
+
+    def check_frame_brightness(self, frame_path: str) -> float:
+        """
+        Brillo promedio (0-255) de una imagen — usado por el QA visual
+        automático (R7) para detectar frames negros/vacíos al inicio o
+        final de un clip exportado.
+        """
+        from PIL import Image
+        img = Image.open(frame_path).convert("L")  # escala de grises
+        pixels = list(img.getdata())
+        return sum(pixels) / len(pixels) if pixels else 0.0
+
     def extract_keyframes(
         self,
         input_video: str,
