@@ -99,6 +99,11 @@ def download_video(
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if not info:
+                raise RuntimeError(
+                    "yt-dlp no devolvió información del video "
+                    "(respuesta vacía del extractor)."
+                )
             duration = info.get('duration') or 0
             if duration > max_duration_s:
                 raise ValueError(
@@ -109,5 +114,13 @@ def download_video(
             filename = ydl.prepare_filename(info)
             logger.info(f"Video descargado: {filename}")
             return filename
+    except (ValueError, RuntimeError):
+        # Nuestras propias excepciones de contrato (URL/duración/info vacía)
+        # ya vienen limpias — no las re-envolvemos.
+        raise
     except yt_dlp.utils.DownloadError as e:
         raise RuntimeError(f"No se pudo descargar el video: {e}")
+    except Exception as e:
+        # Cualquier otro error de yt-dlp (red, error interno, etc.) que no
+        # sea DownloadError — no debe escapar como traceback crudo.
+        raise RuntimeError(f"Error inesperado al descargar el video: {e}")
