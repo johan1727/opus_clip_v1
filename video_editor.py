@@ -441,6 +441,22 @@ class VideoEditor:
             logger.error(f"Error FFmpeg: {e.stderr.decode() if e.stderr else str(e)}")
             raise RuntimeError(f"FFmpeg falló: {e}")
     
+    @staticmethod
+    def _apply_keyword_emphasis(hook_text: str, hook_keywords: str) -> str:
+        """
+        Pone en MAYÚSCULAS la subcadena `hook_keywords` dentro de `hook_text`,
+        preservando el resto del texto tal cual. Si `hook_keywords` no
+        aparece literal dentro de `hook_text` (Gemini no siempre cita exacto),
+        devuelve `hook_text` sin cambios — no rompe el render por esto.
+        """
+        if not hook_keywords or not hook_keywords.strip():
+            return hook_text
+        keywords = hook_keywords.strip()
+        idx = hook_text.lower().find(keywords.lower())
+        if idx == -1:
+            return hook_text
+        return hook_text[:idx] + keywords.upper() + hook_text[idx + len(keywords):]
+
     def _build_hook_clip(
         self,
         hook_text: str,
@@ -448,6 +464,7 @@ class VideoEditor:
         video_w: int,
         video_h: int,
         duration: float = 2.2,
+        hook_keywords: str = "",
     ) -> List[Any]:
         """
         Overlay del "hook" (frase gancho) quemado en pantalla durante los primeros
@@ -459,6 +476,7 @@ class VideoEditor:
         """
         if not hook_text or not hook_text.strip():
             return []
+        hook_text = self._apply_keyword_emphasis(hook_text.strip(), hook_keywords)
         fade = min(0.25, duration / 4)
         hook_fontsize = int(style.fontsize * 1.15)
         clip = TextClip(
@@ -514,6 +532,7 @@ class VideoEditor:
         style: Optional[SubtitleStyle] = None,
         hook_text: Optional[str] = None,
         hook_duration: float = 2.2,
+        hook_keywords: str = "",
     ) -> str:
         """
         Quema subtítulos en el video usando MoviePy (calidad superior).
@@ -591,7 +610,7 @@ class VideoEditor:
 
                 subtitle_clips.append(txt_clip)
 
-            subtitle_clips.extend(self._build_hook_clip(hook_text, style, video.w, video.h, hook_duration))
+            subtitle_clips.extend(self._build_hook_clip(hook_text, style, video.w, video.h, hook_duration, hook_keywords))
 
             # Componer video final
             final_video = CompositeVideoClip([video] + subtitle_clips, size=video.size)
@@ -698,6 +717,7 @@ class VideoEditor:
         animation_mode: str = "karaoke",
         hook_text: Optional[str] = None,
         hook_duration: float = 2.2,
+        hook_keywords: str = "",
     ) -> str:
         """
         Quema subtítulos estilo karaoke (palabra por palabra) con efecto de highlight.
@@ -826,7 +846,7 @@ class VideoEditor:
                     
                     subtitle_clips.append(word_highlight)
 
-            subtitle_clips.extend(self._build_hook_clip(hook_text, style, video.w, video.h, hook_duration))
+            subtitle_clips.extend(self._build_hook_clip(hook_text, style, video.w, video.h, hook_duration, hook_keywords))
 
             # Componer video
             final_video = CompositeVideoClip([video] + subtitle_clips, size=video.size)
@@ -1274,6 +1294,7 @@ class VideoEditor:
         hook_text: Optional[str] = None,
         show_hook: bool = True,
         hook_duration: float = 2.2,
+        hook_keywords: str = "",
     ) -> str:
         """
         Pipeline completo: crop a 9:16 + subtítulos.
@@ -1407,6 +1428,7 @@ class VideoEditor:
                     animation_mode=subtitle_mode,
                     hook_text=hook_text if show_hook else None,
                     hook_duration=hook_duration,
+                    hook_keywords=hook_keywords,
                 )
             else:
                 self.burn_subtitles_moviepy(
@@ -1416,6 +1438,7 @@ class VideoEditor:
                     style=style,
                     hook_text=hook_text if show_hook else None,
                     hook_duration=hook_duration,
+                    hook_keywords=hook_keywords,
                 )
             
             # Limpiar temp

@@ -73,6 +73,7 @@ class ViralClip:
     ideal_platform: str = "tiktok"
     edit_recipe: str = ""
     hashtags: List[str] = field(default_factory=list)
+    hook_keywords: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -93,6 +94,7 @@ class ViralClip:
             'ideal_platform': self.ideal_platform,
             'edit_recipe': self.edit_recipe,
             'hashtags': self.hashtags,
+            'hook_keywords': self.hook_keywords,
         }
 
 
@@ -399,7 +401,8 @@ tiktok | reels | shorts | linkedin | twitter | landscape
       "tension_point": "Segundo 15: ojos desorbitados, pausa dramática de 1s antes del reveal",
       "payoff": "Segundo 22: revelación escalofriante con reacción final",
       "edit_recipe": "Zoom punch-in a cara de sorpresa seg 2 + freeze 0.5s + captions grandes del hook",
-      "hashtags": ["#storytime", "#miedo", "#casaembrujada", "#viral", "#fyp"]
+      "hashtags": ["#storytime", "#miedo", "#casaembrujada", "#viral", "#fyp"],
+      "hook_keywords": "no vas a creer"
     }}
   ]
 }}
@@ -418,6 +421,9 @@ tiktok | reels | shorts | linkedin | twitter | landscape
 - `hashtags`: 4-6 hashtags de descubrimiento sobre el TEMA/CONTENIDO real del clip (no sobre por
   qué es viral). Mezclá 1-2 de nicho específico del tema + 2-3 genéricos de alcance (ej. #fyp,
   #viral, #parati) + 1 de la plataforma/mood si aplica. En minúsculas, sin espacios, sin acentos.
+- `hook_keywords`: 2-4 palabras CONSECUTIVAS tomadas literalmente del texto
+  de `hook` que deberían resaltarse visualmente (la parte más impactante).
+  Deben ser una subcadena EXACTA de `hook`, no una paráfrasis.
 - emotional_arc_score bajo (< 6.0) = clip probablemente aburrido o monótono
 - Idealmente inicia/termina en cambios de escena o silencios naturales
 
@@ -589,6 +595,7 @@ Identifica ahora los {num_clips} mejores clips:"""
                             ideal_platform=str(clip.get('ideal_platform', 'tiktok')),
                             edit_recipe=str(clip.get('edit_recipe', '')),
                             hashtags=_parse_hashtags(clip.get('hashtags')),
+                            hook_keywords=str(clip.get('hook_keywords', '')),
                         ))
                     except (ValueError, TypeError, KeyError) as e:
                         logger.warning(f"Clip inválido ignorado: {e}")
@@ -740,7 +747,8 @@ Al revisar los frames, enfócate en:
       "tension_point": "descripción del momento de máxima emoción visible",
       "payoff": "descripción del payoff/resolución",
       "edit_recipe": "instrucciones específicas basadas en la expresión facial/gesto visible",
-      "hashtags": ["#tema-especifico-1", "#tema-especifico-2", "#fyp", "#viral", "#parati"]
+      "hashtags": ["#tema-especifico-1", "#tema-especifico-2", "#fyp", "#viral", "#parati"],
+      "hook_keywords": "no vas a creer"
     }}
   ]
 }}
@@ -751,6 +759,9 @@ Al revisar los frames, enfócate en:
 - Hooks genéricos = descartar
 - hashtags: 4-6 hashtags sobre el TEMA real del clip (no sobre por qué es viral), minúsculas,
   sin espacios ni acentos, mezclando nicho + alcance genérico (#fyp, #viral, #parati)
+- hook_keywords: 2-4 palabras CONSECUTIVAS tomadas literalmente del texto de
+  `hook` que deberían resaltarse visualmente. Deben ser una subcadena EXACTA
+  de `hook`, no una paráfrasis.
 
 Identifica los {num_clips} mejores clips:"""
 
@@ -808,6 +819,7 @@ Identifica los {num_clips} mejores clips:"""
                             ideal_platform=str(clip.get('ideal_platform', 'tiktok')),
                             edit_recipe=str(clip.get('edit_recipe', '')),
                             hashtags=_parse_hashtags(clip.get('hashtags')),
+                            hook_keywords=str(clip.get('hook_keywords', '')),
                         ))
                     except (ValueError, TypeError, KeyError) as e:
                         logger.warning(f"Clip inválido ignorado: {e}")

@@ -37,6 +37,7 @@ class ClipState:
     ideal_platform: str = "tiktok"
     edit_recipe: str = ""
     hashtags: List[str] = None
+    hook_keywords: str = ""
     segments: List[Dict[str, Any]] = None
     subtitle_edits: Dict[int, str] = None  # segment_id -> texto editado
 
@@ -124,6 +125,7 @@ class StateManager:
                 ideal_platform=str(clip_data.get('ideal_platform', 'tiktok')),
                 edit_recipe=str(clip_data.get('edit_recipe', '')),
                 hashtags=list(clip_data.get('hashtags', []) or []),
+                hook_keywords=str(clip_data.get('hook_keywords', '')),
                 segments=clip_data.get('segments', []),
                 subtitle_edits={}
             )
@@ -182,6 +184,7 @@ class StateManager:
                     'ideal_platform': c.ideal_platform,
                     'edit_recipe': c.edit_recipe,
                     'hashtags': c.hashtags,
+                    'hook_keywords': c.hook_keywords,
                     'reason': c.reason,
                     'hook': c.hook,
                     'selected': c.selected,
@@ -246,6 +249,7 @@ class StateManager:
                     ideal_platform=str(clip_data.get('ideal_platform', 'tiktok')),
                     edit_recipe=str(clip_data.get('edit_recipe', '')),
                     hashtags=list(clip_data.get('hashtags', []) or []),
+                    hook_keywords=str(clip_data.get('hook_keywords', '')),
                     reason=str(clip_data.get('reason', '')),
                     hook=str(clip_data.get('hook', '')),
                     selected=bool(clip_data.get('selected', True)),

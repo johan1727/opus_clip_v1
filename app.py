@@ -390,6 +390,7 @@ class OpusClipPro:
                     'edit_recipe': clip.edit_recipe,
                     'reason': clip.reason,
                     'hook': clip.hook,
+                    'hook_keywords': clip.hook_keywords,
                     'segments': word_segs_for_clip,
                 })
                 total_tokens += len(clip.reason + clip.hook) // 4 + 100
@@ -983,6 +984,7 @@ class OpusClipPro:
                 compress_pauses=compress_pauses,
                 hook_text=clip_state.hook,
                 show_hook=show_hook,
+                hook_keywords=getattr(clip_state, 'hook_keywords', ''),
             )
             current = base_out
 
