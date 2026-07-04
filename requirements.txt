@@ -26,6 +26,13 @@ numpy>=1.24.0
 python-dotenv==1.0.1
 tqdm==4.66.5
 
+# Descarga de video por URL (YouTube/TikTok/Instagram/X)
+# NOTA: yt-dlp necesita actualizarse seguido porque YouTube cambia su
+# esquema de firmas; 2024.12.13 (versión originalmente planeada) ya no
+# puede descargar de YouTube ("No video formats found") - verificado
+# contra un video real. Pineado a la última versión estable disponible.
+yt-dlp==2026.6.9
+
 # Typing
 typing-extensions==4.12.2
 

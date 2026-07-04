@@ -20,6 +20,7 @@ from video_editor import VideoEditor, FACE_TRACKING_AVAILABLE, SubtitleStyle, co
 from state_manager import StateManager, ProjectState, ClipState
 from subtitle_editor import SubtitleEditor, create_editor_from_transcription, PREDEFINED_STYLES
 from audio_analyzer import AudioAnalyzer
+from url_downloader import is_supported_url, download_video
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,7 +96,31 @@ class OpusClipPro:
             return False, ERRORS['VIDEO_TOO_LARGE']
         
         return True, "✅ Video válido"
-    
+
+    def download_from_url(self, url: str, progress: gr.Progress) -> Tuple[str, Optional[str]]:
+        """
+        Descarga un video desde una URL (YouTube/TikTok/Instagram/X) a
+        `videos para editar/`, mismo directorio que usa el flujo manual.
+
+        Returns:
+            (mensaje_status, ruta_del_archivo_o_None)
+        """
+        if not url or not url.strip():
+            return "❌ Pegá un link primero", None
+        if not is_supported_url(url):
+            return "❌ Link no soportado (YouTube, TikTok, Instagram o X)", None
+        try:
+            def _progress_cb(p, msg):
+                progress(p, desc=msg)
+            filepath = download_video(
+                url.strip(), "videos para editar", progress_callback=_progress_cb
+            )
+            return f"✅ Descargado: {Path(filepath).name}", filepath
+        except (ValueError, RuntimeError) as e:
+            logger.warning(f"Descarga por URL falló: {e}")
+            gr.Warning(f"❌ No se pudo descargar: {e}")
+            return f"❌ {e}", None
+
     def cancel_analysis(self) -> str:
         """Flags the current analysis to stop after the current chunk."""
         self.cancel_requested = True
@@ -2856,7 +2881,18 @@ class OpusClipPro:
                                         
                                         # Video info display
                                         video_info = gr.Textbox(label="", value="No hay video seleccionado", show_label=False, interactive=False)
-                                        
+
+                                        # Descarga por URL (YouTube/TikTok/IG/X)
+                                        with gr.Row():
+                                            url_input = gr.Textbox(
+                                                label="",
+                                                placeholder="O pegá un link de YouTube/TikTok/Instagram/X...",
+                                                show_label=False,
+                                                scale=4,
+                                            )
+                                            download_url_btn = gr.Button("⬇️ Descargar", elem_classes=["btn-secondary"], scale=1)
+                                        url_download_status = gr.Textbox(label="", show_label=False, interactive=False, visible=False)
+
                                         # Recent projects dashboard
                                         with gr.Column(elem_classes=["glass-panel-sm"]):
                                             gr.HTML("""<div style="font-size: 14px; font-weight: 700; color: #e4e1e6; margin-bottom: 8px;">📁 Proyectos Recientes</div>""")
@@ -3419,6 +3455,18 @@ class OpusClipPro:
                 except Exception as e:
                     logger.warning(f"Precheck de video falló: {e}")
                     return "", f"Video seleccionado: {Path(video_path).name if video_path else ''}"
+
+            def _on_download_url(url, progress=gr.Progress()):
+                status, filepath = self.download_from_url(url, progress)
+                if filepath:
+                    return status, gr.update(visible=True), gr.update(value=[filepath])
+                return status, gr.update(visible=True), gr.update()
+
+            download_url_btn.click(
+                fn=_on_download_url,
+                inputs=[url_input],
+                outputs=[url_download_status, url_download_status, video_input]
+            )
 
             video_input.change(
                 fn=on_video_select,
