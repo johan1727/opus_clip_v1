@@ -480,7 +480,7 @@ class VideoEditor:
         fade = min(0.25, duration / 4)
         hook_fontsize = int(style.fontsize * 1.15)
         clip = TextClip(
-            text=hook_text.strip(),
+            text=hook_text,
             font_size=hook_fontsize,
             font=style.font,
             color=style.color,
@@ -681,10 +681,24 @@ class VideoEditor:
         No inventa timestamps — cada palabra conserva su start/end original;
         solo se reasignan parent_id/word_index para que cada chunk actúe
         como su propio "segmento padre" en burn_karaoke_subtitles.
+
+        Args:
+            word_segments: Lista de palabras con timing real (`start`/`end`/`text`).
+                El `parent_id` original (si existe) NO es confiable como orden
+                temporal — en el caller de producción es `id(seg)`, una dirección
+                de memoria — por eso se ordena por `start`, nunca por `parent_id`.
+            max_words_per_chunk: Máximo de palabras por chunk antes de cortar.
+            target_chunk_duration: Duración objetivo (segundos) de cada chunk;
+                se corta el chunk actual al alcanzarla aunque no se llegue al
+                máximo de palabras.
+
+        Returns:
+            Lista plana de palabras (mismo shape que word_segments) con
+            `parent_id`/`word_index` reasignados por chunk, en orden cronológico.
         """
         if not word_segments:
             return []
-        ordered = sorted(word_segments, key=lambda w: (w.get('parent_id', 0), w.get('word_index', 0)))
+        ordered = sorted(word_segments, key=lambda w: w['start'])
         chunks: List[List[Dict[str, Any]]] = []
         current: List[Dict[str, Any]] = []
         for w in ordered:

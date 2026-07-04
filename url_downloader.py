@@ -7,7 +7,7 @@ que un archivo subido manualmente.
 import logging
 import re
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
 import yt_dlp
@@ -36,7 +36,7 @@ def is_supported_url(url: str) -> bool:
         return False
     if parsed.scheme not in ("http", "https"):
         return False
-    host = (parsed.netloc or "").lower()
+    host = (parsed.hostname or "").lower()
     host = re.sub(r"^www\.", "", host)
     return any(host == d or host.endswith(f".{d}") for d in SUPPORTED_DOMAINS)
 
@@ -76,7 +76,7 @@ def download_video(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    def _progress_hook(d):
+    def _progress_hook(d: Dict[str, Any]):
         if not progress_callback:
             return
         if d.get('status') == 'downloading':

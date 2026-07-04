@@ -1262,6 +1262,14 @@ class OpusClipPro:
         except Exception as e:
             logger.warning(f"QA visual omitido: {e}")
             result["passed"] = True  # no bloquear el export por un fallo del QA en sí
+        finally:
+            # Los frames son solo para los chequeos de arriba — sin esto se
+            # acumulan 3 JPEGs por clip en TEMP_DIR en cada export.
+            for frame_path in result["frames"]:
+                try:
+                    Path(frame_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
         return result
 
     def _generate_clip_metadata(self, clip_state, index: int, platform: str, brand_name: str = "") -> Optional[str]:
