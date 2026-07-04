@@ -3220,7 +3220,7 @@ class OpusClipPro:
                                         )
                                         zoom_cues_checkbox = gr.Checkbox(
                                             label="Zoom dinámico por energía (F2.3)",
-                                            value=False,
+                                            value=True,
                                             show_label=True
                                         )
                                         compress_pauses_checkbox = gr.Checkbox(
