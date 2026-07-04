@@ -949,6 +949,7 @@ class OpusClipPro:
         enable_zoom_cues: bool = False,
         compress_pauses: bool = False,
         show_hook: bool = True,
+        show_progress_bar: bool = False,
     ) -> Tuple[int, str, bool]:
         """
         Exporta un solo clip con post-procesamiento opcional:
@@ -1027,12 +1028,20 @@ class OpusClipPro:
                 except Exception as _be:
                     logger.warning(f"Branding overlay omitido en clip {i+1}: {_be}")
 
+            # Step 6: progress bar overlay (R4)
+            if show_progress_bar:
+                try:
+                    bar_out = str(temp_base) + "_bar.mp4"
+                    current = self.editor.add_progress_bar_overlay(current, bar_out, bar_color=brand_color)
+                except Exception as _pbe:
+                    logger.warning(f"Barra de progreso omitida en clip {i+1}: {_pbe}")
+
             # Move final result to output_file
             import shutil as _sh
             _sh.move(current, str(output_file))
 
             # Clean up any remaining temps
-            for suffix in ["_base.mp4", "_zoomed.mp4", "_ducked.mp4", "_graded.mp4", "_branded.mp4"]:
+            for suffix in ["_base.mp4", "_zoomed.mp4", "_ducked.mp4", "_graded.mp4", "_branded.mp4", "_bar.mp4"]:
                 p = Path(str(temp_base) + suffix)
                 if p.exists() and str(p) != str(output_file):
                     try:
@@ -1231,6 +1240,7 @@ class OpusClipPro:
         enable_zoom_cues: bool = False,
         compress_pauses: bool = False,
         show_hook: bool = True,
+        show_progress_bar: bool = False,
     ) -> Tuple[str, List, List[str], str]:
         """
         Exporta clips seleccionados, soporta procesamiento paralelo.
@@ -1288,6 +1298,7 @@ class OpusClipPro:
                             enable_zoom_cues,
                             compress_pauses,
                             show_hook,
+                            show_progress_bar,
                         )
                         future_to_index[future] = i
                     
@@ -1318,6 +1329,7 @@ class OpusClipPro:
                         brand_name, brand_color,
                         enable_zoom_cues, compress_pauses,
                         show_hook,
+                        show_progress_bar,
                     )
                     if success:
                         output_files[idx] = result
@@ -3157,6 +3169,24 @@ class OpusClipPro:
                                                     show_label=False,
                                                 )
 
+                                            with gr.Row(elem_classes=["ai-tool"]):
+                                                gr.HTML("""
+                                                <div class="ai-tool-left">
+                                                    <div class="ai-tool-icon">
+                                                        <span class="material-symbols-outlined">linear_scale</span>
+                                                    </div>
+                                                    <div class="ai-tool-info">
+                                                        <div class="ai-tool-name">Barra de Progreso</div>
+                                                        <div class="ai-tool-desc">Línea que avanza con el video — retiene hasta el final</div>
+                                                    </div>
+                                                </div>
+                                                """)
+                                                progress_bar_checkbox = gr.Checkbox(
+                                                    label="",
+                                                    value=True,
+                                                    show_label=False,
+                                                )
+
                                 # Right: Export Action
                                 with gr.Column(scale=4):
                                     with gr.Column(elem_classes=["glass-panel"]):
@@ -3604,17 +3634,18 @@ class OpusClipPro:
             )
             
             export_btn.click(
-                fn=lambda style, sub_mode, face_track, platform, srt, vtt, brand, brand_color, mood_grade, ducking, zoom, pauses, hook, prog=gr.Progress(): self.export_clips(
+                fn=lambda style, sub_mode, face_track, platform, srt, vtt, brand, brand_color, mood_grade, ducking, zoom, pauses, hook, pbar, prog=gr.Progress(): self.export_clips(
                     style, prog, parallel=True, track_faces=face_track, subtitle_mode=sub_mode,
                     platform=platform, export_srt=srt, export_vtt=vtt,
                     brand_name=brand, brand_color=brand_color,
                     enable_mood_grade=mood_grade, enable_ducking=ducking,
-                    enable_zoom_cues=zoom, compress_pauses=pauses, show_hook=hook
+                    enable_zoom_cues=zoom, compress_pauses=pauses, show_hook=hook,
+                    show_progress_bar=pbar
                 ),
                 inputs=[style_dropdown, subtitle_mode_dropdown, face_tracking_checkbox, platform_preset,
                         export_srt_checkbox, export_vtt_checkbox, brand_name_input, brand_color_input,
                         mood_grade_checkbox, audio_ducking_checkbox, zoom_cues_checkbox, compress_pauses_checkbox,
-                        show_hook_checkbox],
+                        show_hook_checkbox, progress_bar_checkbox],
                 outputs=[export_status, output_gallery, output_files, captions_output]
             )
             

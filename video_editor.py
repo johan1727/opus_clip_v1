@@ -1647,6 +1647,94 @@ class VideoEditor:
             return output_path
 
     # ------------------------------------------------------------------
+    # R4 — Barra de progreso quemada (retención: "ya casi termina")
+    # ------------------------------------------------------------------
+
+    def add_progress_bar_overlay(
+        self,
+        input_path: str,
+        output_path: str,
+        bar_color: str = "#7C5CFF",
+        bar_height: int = 6,
+    ) -> str:
+        """
+        Dibuja una barra de progreso delgada en el borde inferior del video,
+        que crece de 0 a ancho completo a medida que avanza el clip. Trigger
+        de retención: "ya casi termina, me quedo a ver el final".
+
+        Nota de implementación: la primera versión usaba el filtro `drawbox`
+        con `w='iw*(t/duration)'` y `t=fill` (thickness). Se descartó tras
+        verificar con un render real que en ffmpeg 8.0 el alias `t` de
+        thickness SIEMPRE sombrea la variable de tiempo `t` usada dentro de
+        las expresiones x/y/w/h del mismo filtro — el ancho salía constante
+        (o a ancho completo) en vez de crecer con el tiempo, sin importar si
+        `t`/`thickness` se fijaba explícitamente o se dejaba en su default.
+        En su lugar se usa un doble `overlay`: una barra sólida de ancho
+        completo + una "tapa" negra del mismo tamaño que se desliza hacia la
+        derecha con el tiempo. El filtro `overlay` sí evalúa `t` como tiempo
+        real por frame porque no tiene ninguna opción propia llamada `t` que
+        choque con esa variable.
+        """
+        try:
+            info = self.get_video_info(input_path)
+            duration = info.get('duration', 0)
+            width = info.get('width', 0)
+            if duration <= 0 or width <= 0:
+                import shutil
+                shutil.copy2(input_path, output_path)
+                return output_path
+
+            color_hex = bar_color.lstrip('#')
+            ffmpeg_color = f"0x{color_hex}"
+
+            probe = ffmpeg.probe(input_path)
+            has_audio = any(
+                s.get('codec_type') == 'audio' for s in probe.get('streams', [])
+            )
+
+            main_in = ffmpeg.input(input_path)
+            bar_in = ffmpeg.input(
+                f"color=c={ffmpeg_color}:s={width}x{bar_height}:d={duration:.3f}",
+                f="lavfi",
+            )
+            cover_in = ffmpeg.input(
+                f"color=c=black:s={width}x{bar_height}:d={duration:.3f}",
+                f="lavfi",
+            )
+
+            with_bar = ffmpeg.filter(
+                [main_in.video, bar_in.video], "overlay",
+                x=0, y="main_h-overlay_h", shortest=1,
+            )
+            video_out = ffmpeg.filter(
+                [with_bar, cover_in.video], "overlay",
+                x=f"{width}*(t/{duration:.3f})", y="main_h-overlay_h", shortest=1,
+            )
+
+            output_kwargs = dict(
+                vcodec=self.config.codec,
+                preset=self.config.preset,
+                pix_fmt="yuv420p",
+                loglevel="warning",
+            )
+            if has_audio:
+                stream = ffmpeg.output(
+                    video_out, main_in.audio, output_path,
+                    acodec="copy", **output_kwargs,
+                )
+            else:
+                stream = ffmpeg.output(video_out, output_path, **output_kwargs)
+
+            stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
+            logger.info(f"📊 Barra de progreso agregada ({duration:.1f}s)")
+            return output_path
+        except Exception as e:
+            logger.warning(f"Barra de progreso falló ({e}), usando original")
+            import shutil
+            shutil.copy2(input_path, output_path)
+            return output_path
+
+    # ------------------------------------------------------------------
     # F3.2 — Branding overlay (intro/outro 0.5s fade)
     # ------------------------------------------------------------------
 
