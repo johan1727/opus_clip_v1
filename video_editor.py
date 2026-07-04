@@ -698,7 +698,7 @@ class VideoEditor:
         """
         if not word_segments:
             return []
-        ordered = sorted(word_segments, key=lambda w: w['start'])
+        ordered = sorted(word_segments, key=lambda w: (w['start'], w.get('word_index', 0)))
         chunks: List[List[Dict[str, Any]]] = []
         current: List[Dict[str, Any]] = []
         for w in ordered:
