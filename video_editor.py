@@ -1305,20 +1305,10 @@ class VideoEditor:
         temp_crop = output_path.parent / f"temp_crop_{output_path.stem}.mp4"
 
         try:
-            # Paso 1: Crop a 9:16 con FFmpeg (rápido)
-            logger.info(f"Creando clip viral: {start_time:.1f}s - {end_time:.1f}s")
-
-            self.crop_to_vertical_ffmpeg(
-                str(input_video),
-                str(temp_crop),
-                start_time,
-                end_time,
-                target_width or self.config.width,
-                target_height or self.config.height,
-                track_faces=track_faces
-            )
-
-            # Paso 2: Ajustar timestamps de segmentos al clip recortado
+            # Paso 1: Ajustar timestamps de segmentos al clip pedido (todavía
+            # sin cortar el video) — hace falta esto ANTES de cortar con
+            # ffmpeg para poder recortar la cola de silencio (R5) sobre el
+            # end_time real que se le va a pedir a ffmpeg.
             adjusted_segments = []
             for seg in segments:
                 adj_start = seg['start'] - start_time
@@ -1334,6 +1324,40 @@ class VideoEditor:
                         'end': adj_end,
                         'text': seg['text']
                     })
+
+            # Paso 1.5 (R5): recortar la cola de silencio del final — un clip
+            # que termina 2-3s después de la última palabra invita al scroll
+            # antes de que termine; recortamos al último texto + margen fijo,
+            # ANTES de cortar el video con ffmpeg para que el recorte sea real.
+            TRAILING_SILENCE_MARGIN = 0.3
+            clip_duration_requested = end_time - start_time
+            if adjusted_segments:
+                last_text_end = max(seg['end'] for seg in adjusted_segments)
+                trimmed_duration = min(clip_duration_requested, last_text_end + TRAILING_SILENCE_MARGIN)
+                if trimmed_duration < clip_duration_requested - 0.5:
+                    logger.info(
+                        f"✂️ Recorte de cola de silencio: {clip_duration_requested:.1f}s -> {trimmed_duration:.1f}s"
+                    )
+                    end_time = start_time + trimmed_duration
+                    adjusted_segments = [
+                        seg for seg in adjusted_segments if seg['start'] < trimmed_duration
+                    ]
+                    for seg in adjusted_segments:
+                        seg['end'] = min(seg['end'], trimmed_duration)
+
+            # Paso 2: Crop a 9:16 con FFmpeg (rápido) — usa el end_time ya
+            # recortado si el paso 1.5 aplicó un recorte de cola de silencio.
+            logger.info(f"Creando clip viral: {start_time:.1f}s - {end_time:.1f}s")
+
+            self.crop_to_vertical_ffmpeg(
+                str(input_video),
+                str(temp_crop),
+                start_time,
+                end_time,
+                target_width or self.config.width,
+                target_height or self.config.height,
+                track_faces=track_faces
+            )
 
             # Paso 2.5: Comprimir pausas largas (F4), si se pidió
             if compress_pauses:
